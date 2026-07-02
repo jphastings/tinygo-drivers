@@ -5,12 +5,14 @@
 // https://www.adafruit.com/product/4351
 //
 // Only a subset of the chip's functionality is implemented: the Infineon
-// I2C protocol transport, opening the application, reading true random
-// bytes, and reading data objects such as the coprocessor UID. The shielded
-// (encrypted) connection and the cryptographic operations (ECDSA, ECDH,
-// RSA, AES, key management) are not implemented. Command and response
-// packets are limited to a single protocol frame, which is sufficient for
-// the commands offered here.
+// I2C protocol transport including packet chaining, opening the
+// application, true random bytes, reading and writing data objects,
+// SHA-256 hashing, ECDSA signing and verification, ECC key pair
+// generation (NIST P-256 and P-384) and ECDH shared secrets. The shielded
+// (encrypted) connection, RSA, AES/HMAC and protected key export are not
+// implemented. Beware that without the shielded connection everything on
+// the I2C bus - commands, data objects, even ECDH shared secrets - is
+// unencrypted and visible to anyone able to probe the bus.
 //
 // Datasheet and protocol references:
 //
@@ -37,20 +39,25 @@ var (
 	errCRCMismatch    = errors.New("trustm: frame CRC mismatch")
 	errNack           = errors.New("trustm: frame rejected by chip")
 	errUnexpectedAck  = errors.New("trustm: unexpected acknowledgement")
-	errChained        = errors.New("trustm: chained response not supported")
-	errTooLong        = errors.New("trustm: request too long for one frame")
+	errBrokenChain    = errors.New("trustm: broken packet chain")
+	errTooLong        = errors.New("trustm: packet too long for the driver's buffers")
 	errLengthOutRange = errors.New("trustm: length out of range")
 	errDeviceError    = errors.New("trustm: command failed on the chip")
 	errShortResponse  = errors.New("trustm: response shorter than expected")
+	errShortBuffer    = errors.New("trustm: response larger than the buffer")
 )
 
 // The largest frame the chip can be asked to support (IFX_I2C_FRAME_SIZE in
 // the Infineon host library); the chip default is 0x110 bytes
 const maxFrameSize = 277
 
-// Byte layout of the transmit buffer: the DATA register address, then the
-// data link frame (FCTR, length), then the transport layer packet control
-// byte, then the command APDU. The frame CRC follows the APDU.
+// The largest command or response packet (APDU) the driver can exchange;
+// packets bigger than one frame are chained across several frames
+const maxPacketSize = 700
+
+// Byte layout of the frame transmit buffer: the DATA register address, then
+// the data link frame (FCTR, length), then the transport layer packet
+// control byte, then a packet fragment. The frame CRC follows the fragment.
 const (
 	fctrOffset = 1
 	pctrOffset = 4
@@ -95,6 +102,13 @@ type Device struct {
 	// Data link layer frame sequence counters: last sent, last received
 	txSeq uint8
 	rxSeq uint8
+
+	// Command and response packets are staged in these buffers so they
+	// can span several frames (packet chaining). 700 bytes each fits
+	// reading or writing data objects such as the device certificate in
+	// a few pieces, at a cost of 1.4kB of RAM per Device.
+	txApdu [maxPacketSize]byte
+	rxApdu [maxPacketSize]byte
 
 	txBuf  [1 + maxFrameSize]byte
 	rxBuf  [maxFrameSize]byte
@@ -158,7 +172,7 @@ func (d *Device) Configure() error {
 		d.frameSize = maxFrameSize
 	}
 
-	copy(d.txBuf[apduOffset+apduHeaderSize:], applicationID[:])
+	copy(d.txApdu[apduHeaderSize:], applicationID[:])
 	_, err = d.command(CMD_OPEN_APPLICATION, paramInitApp, len(applicationID))
 	if err != nil {
 		d.frameSize = 0
@@ -183,8 +197,8 @@ func (d *Device) GetRandom(rnd []byte) error {
 		request = minRandomLength
 	}
 
-	d.txBuf[apduOffset+apduHeaderSize] = byte(request >> 8)
-	d.txBuf[apduOffset+apduHeaderSize+1] = byte(request)
+	d.txApdu[apduHeaderSize] = byte(request >> 8)
+	d.txApdu[apduHeaderSize+1] = byte(request)
 	out, err := d.command(CMD_GET_RANDOM, paramTRNG, 2)
 	if err != nil {
 		return err
@@ -204,13 +218,11 @@ func (d *Device) GetDataObject(oid uint16, offset uint16, data []byte) (int, err
 	if d.frameSize == 0 {
 		return 0, errNotConfigured
 	}
-	// Responses are limited to a single frame in this driver
-	maxRead := int(d.frameSize) - dlOverhead - 1 - apduHeaderSize
-	if len(data) > maxRead {
+	if len(data) > len(d.rxApdu)-apduHeaderSize {
 		return 0, errTooLong
 	}
 
-	in := d.txBuf[apduOffset+apduHeaderSize:]
+	in := d.txApdu[apduHeaderSize:]
 	in[0] = byte(oid >> 8)
 	in[1] = byte(oid)
 	in[2] = byte(offset >> 8)
@@ -235,15 +247,218 @@ func (d *Device) UID() (uid [UIDLength]byte, err error) {
 	return
 }
 
+// SetDataObject writes data into a data object at the given byte offset.
+// A single write is limited to 692 bytes; larger objects can be written
+// in pieces using offset.
+func (d *Device) SetDataObject(oid uint16, offset uint16, data []byte) error {
+	if d.frameSize == 0 {
+		return errNotConfigured
+	}
+	in := d.txApdu[apduHeaderSize:]
+	if len(data) > len(in)-4 {
+		return errTooLong
+	}
+	in[0] = byte(oid >> 8)
+	in[1] = byte(oid)
+	in[2] = byte(offset >> 8)
+	in[3] = byte(offset)
+	copy(in[4:], data)
+	_, err := d.command(CMD_SET_DATA_OBJECT, paramWriteData, 4+len(data))
+	return err
+}
+
+// CalcHash computes the SHA-256 digest of data on the chip. Long messages
+// are fed to the chip in parts, so data may be arbitrarily large.
+func (d *Device) CalcHash(data []byte) (digest [32]byte, err error) {
+	if d.frameSize == 0 {
+		return digest, errNotConfigured
+	}
+	in := d.txApdu[apduHeaderSize:]
+	maxChunk := len(in) - 3 // a sequence tag and 16-bit length per part
+	for sent := 0; ; {
+		chunk, seq := len(data)-sent, uint8(hashStartAndFinal)
+		switch {
+		case sent == 0 && chunk <= maxChunk:
+			// hashStartAndFinal: the whole message in one command
+		case sent == 0:
+			seq, chunk = hashStart, maxChunk
+		case chunk > maxChunk:
+			seq, chunk = hashContinue, maxChunk
+		default:
+			seq = hashFinal
+		}
+		in[0] = seq
+		in[1] = byte(chunk >> 8)
+		in[2] = byte(chunk)
+		copy(in[3:], data[sent:sent+chunk])
+		out, err := d.command(CMD_CALC_HASH, paramSHA256, 3+chunk)
+		if err != nil {
+			return digest, err
+		}
+		sent += chunk
+
+		if seq != hashStartAndFinal && seq != hashFinal {
+			continue
+		}
+		// The last part is answered with the digest in a TLV
+		if len(out) < 3+len(digest) || out[0] != tagDigestOut ||
+			int(out[1])<<8|int(out[2]) != len(digest) {
+			return digest, errShortResponse
+		}
+		copy(digest[:], out[3:])
+		return digest, nil
+	}
+}
+
+// CalcSign signs a digest - typically a SHA-256 hash, e.g. from CalcHash -
+// with the ECDSA private key stored in keyOID, whose usage must include
+// KeyUsageSign. The signature is written to sig and its length returned.
+//
+// The chip encodes the signature as the two DER INTEGERs r and s
+// concatenated, without the outer SEQUENCE most ECDSA tooling expects, so
+// the caller may need to prepend one. A P-256 signature is at most 70
+// bytes, a P-384 signature at most 102.
+func (d *Device) CalcSign(keyOID uint16, digest, sig []byte) (int, error) {
+	if d.frameSize == 0 {
+		return 0, errNotConfigured
+	}
+	in := d.txApdu[apduHeaderSize:]
+	if len(digest) > len(in)-8 {
+		return 0, errTooLong
+	}
+	n := putTLV(in, 0, tagDigest, digest)
+	n = putTLVWord(in, n, tagSignKey, keyOID)
+	out, err := d.command(CMD_CALC_SIGN, paramECDSA, n)
+	if err != nil {
+		return 0, err
+	}
+	if len(out) > len(sig) {
+		return 0, errShortBuffer
+	}
+	return copy(sig, out), nil
+}
+
+// VerifySign checks an ECDSA signature over a digest against a public key
+// supplied by the caller: the DER BIT STRING encoding of an uncompressed
+// EC point, as returned by GenKeyPair. The signature must be encoded as
+// CalcSign produces it: the two DER INTEGERs r and s without an outer
+// SEQUENCE. A signature that does not match yields an error.
+func (d *Device) VerifySign(curve Curve, publicKey, digest, sig []byte) error {
+	if d.frameSize == 0 {
+		return errNotConfigured
+	}
+	in := d.txApdu[apduHeaderSize:]
+	if len(digest)+len(sig)+len(publicKey) > len(in)-13 {
+		return errTooLong
+	}
+	n := putTLV(in, 0, tagDigest, digest)
+	n = putTLV(in, n, tagSignature, sig)
+	n = putTLVByte(in, n, tagAlgorithm, uint8(curve))
+	n = putTLV(in, n, tagPublicKey, publicKey)
+	_, err := d.command(CMD_VERIFY_SIGN, paramECDSA, n)
+	return err
+}
+
+// GenKeyPair generates an ECC key pair on the chip. The private key is
+// stored in keyOID (e.g. OID_USER_KEY_1) and never leaves the chip; the
+// public key is written to pub and its length returned. The public key is
+// encoded as a DER BIT STRING holding the uncompressed EC point: 68 bytes
+// (0x03, 0x42, 0x00, 0x04, X, Y) for P-256, 100 bytes for P-384.
+func (d *Device) GenKeyPair(keyOID uint16, curve Curve, usage KeyUsage, pub []byte) (int, error) {
+	if d.frameSize == 0 {
+		return 0, errNotConfigured
+	}
+	in := d.txApdu[apduHeaderSize:]
+	n := putTLVWord(in, 0, tagPrivateKey, keyOID)
+	n = putTLVByte(in, n, tagKeyUsage, uint8(usage))
+	out, err := d.command(CMD_GEN_KEYPAIR, uint8(curve), n)
+	if err != nil {
+		return 0, err
+	}
+	if len(out) < 3 || out[0] != tagPublicKeyOut {
+		return 0, errShortResponse
+	}
+	keyLen := int(out[1])<<8 | int(out[2])
+	if 3+keyLen > len(out) {
+		return 0, errShortResponse
+	}
+	if keyLen > len(pub) {
+		return 0, errShortBuffer
+	}
+	return copy(pub, out[3:3+keyLen]), nil
+}
+
+// ECDH computes a Diffie-Hellman shared secret from the private key in
+// keyOID, whose usage must include KeyUsageKeyAgree, and the peer's public
+// key: a DER BIT STRING as returned by GenKeyPair. The secret - the X
+// coordinate of the shared point, 32 bytes for P-256 - is written to
+// secret and its length returned.
+//
+// Beware: this driver does not implement the shielded connection, so the
+// chip returns the shared secret over the I2C bus unencrypted, readable
+// by anyone able to probe the bus.
+func (d *Device) ECDH(keyOID uint16, curve Curve, peerPublicKey, secret []byte) (int, error) {
+	if d.frameSize == 0 {
+		return 0, errNotConfigured
+	}
+	in := d.txApdu[apduHeaderSize:]
+	if len(peerPublicKey) > len(in)-12 {
+		return 0, errTooLong
+	}
+	n := putTLVWord(in, 0, tagPrivateKey, keyOID)
+	n = putTLVByte(in, n, tagAlgorithm, uint8(curve))
+	n = putTLV(in, n, tagPublicKey, peerPublicKey)
+	n = putTLVHeader(in, n, tagExport, 0)
+	out, err := d.command(CMD_CALC_SSEC, paramECDH, n)
+	if err != nil {
+		return 0, err
+	}
+	if len(out) > len(secret) {
+		return 0, errShortBuffer
+	}
+	return copy(secret, out), nil
+}
+
+// putTLVHeader writes a TLV header (tag, 16-bit big-endian length) into
+// buf at index i and returns the index just past it
+func putTLVHeader(buf []byte, i int, tag uint8, length int) int {
+	buf[i] = tag
+	buf[i+1] = byte(length >> 8)
+	buf[i+2] = byte(length)
+	return i + 3
+}
+
+// putTLV writes a full TLV into buf at index i and returns the index just
+// past it
+func putTLV(buf []byte, i int, tag uint8, value []byte) int {
+	i = putTLVHeader(buf, i, tag, len(value))
+	return i + copy(buf[i:], value)
+}
+
+// putTLVWord writes a TLV holding one 16-bit big-endian value, e.g. an OID
+func putTLVWord(buf []byte, i int, tag uint8, value uint16) int {
+	i = putTLVHeader(buf, i, tag, 2)
+	buf[i] = byte(value >> 8)
+	buf[i+1] = byte(value)
+	return i + 2
+}
+
+// putTLVByte writes a TLV holding a single byte, e.g. an algorithm
+// identifier
+func putTLVByte(buf []byte, i int, tag, value uint8) int {
+	i = putTLVHeader(buf, i, tag, 1)
+	buf[i] = value
+	return i + 1
+}
+
 // command sends the APDU whose InData was already placed in
-// d.txBuf[apduOffset+apduHeaderSize:] and returns the OutData of the
-// response APDU, valid until the next operation
+// d.txApdu[apduHeaderSize:] and returns the OutData of the response APDU,
+// valid until the next operation
 func (d *Device) command(cmd, param uint8, inLen int) ([]byte, error) {
-	apdu := d.txBuf[apduOffset:]
-	apdu[0] = cmd
-	apdu[1] = param
-	apdu[2] = byte(inLen >> 8)
-	apdu[3] = byte(inLen)
+	d.txApdu[0] = cmd
+	d.txApdu[1] = param
+	d.txApdu[2] = byte(inLen >> 8)
+	d.txApdu[3] = byte(inLen)
 
 	resp, err := d.transceive(apduHeaderSize + inLen)
 	if err != nil {
@@ -265,69 +480,142 @@ func (d *Device) command(cmd, param uint8, inLen int) ([]byte, error) {
 // Frame overhead of the data link layer: FCTR, 2 length bytes, 2 CRC bytes
 const dlOverhead = 5
 
-// transceive wraps the APDU already placed in d.txBuf[apduOffset:] in a
-// transport packet and data link frame, sends it, and waits for the
-// acknowledgement and response frames. It returns the response APDU.
-func (d *Device) transceive(apduLen int) ([]byte, error) {
+// transceive sends the command packet staged in d.txApdu, fragmented
+// across as many data link frames as needed, then receives the response
+// packet, reassembling chained frames. It returns the response APDU,
+// valid until the next operation.
+func (d *Device) transceive(packetLen int) ([]byte, error) {
 	if d.frameSize == 0 {
 		return nil, errNotConfigured
 	}
-	payloadLen := uint16(apduLen) + 1 // transport layer PCTR byte
-	if int(payloadLen)+dlOverhead > int(d.frameSize) {
-		return nil, errTooLong
+	// Packet bytes carried per frame, after the transport layer PCTR
+	maxData := int(d.frameSize) - dlOverhead - 1
+
+	for sent := 0; ; {
+		pctr, chunk := uint8(pctrChainLast), packetLen-sent
+		switch {
+		case sent == 0 && chunk <= maxData:
+			pctr = pctrChainNone
+		case sent == 0:
+			pctr, chunk = pctrChainFirst, maxData
+		case chunk > maxData:
+			pctr, chunk = pctrChainIntermediate, maxData
+		}
+		err := d.sendDataFrame(pctr, d.txApdu[sent:sent+chunk])
+		if err != nil {
+			return nil, err
+		}
+		sent += chunk
+		if sent == packetLen {
+			break
+		}
+		// Each fragment but the last must be acknowledged with a
+		// control frame before the next may be sent
+		control, _, err := d.nextFrame()
+		if err != nil {
+			return nil, err
+		}
+		if !control {
+			return nil, errBadFrame
+		}
 	}
+	return d.receiveResponse(maxData)
+}
+
+// sendDataFrame wraps one packet fragment in a data link frame and writes
+// it to the DATA register
+func (d *Device) sendDataFrame(pctr uint8, fragment []byte) error {
+	payloadLen := uint16(len(fragment)) + 1 // transport layer PCTR byte
 
 	d.txSeq = (d.txSeq + 1) & fctrAckNrMask
 	d.txBuf[0] = REG_DATA
 	d.txBuf[fctrOffset] = d.txSeq<<fctrFrameNrPos | d.rxSeq // seqctr: ACK
 	d.txBuf[fctrOffset+1] = byte(payloadLen >> 8)
 	d.txBuf[fctrOffset+2] = byte(payloadLen)
-	d.txBuf[pctrOffset] = pctrChainNone
+	d.txBuf[pctrOffset] = pctr
+	copy(d.txBuf[apduOffset:], fragment)
 	crc := crc16(d.txBuf[fctrOffset : pctrOffset+payloadLen])
 	d.txBuf[pctrOffset+payloadLen] = byte(crc >> 8)
 	d.txBuf[pctrOffset+payloadLen+1] = byte(crc)
 
-	err := d.tx(d.txBuf[:1+dlOverhead+int(payloadLen)], nil)
+	return d.tx(d.txBuf[:1+dlOverhead+int(payloadLen)], nil)
+}
+
+// receiveResponse collects the response packet: the chip acknowledges our
+// last frame either with a control frame or piggybacked on its response,
+// which arrives in one frame or as a chain of fragments. Chained
+// fragments are reassembled into d.rxApdu; an unchained response is
+// returned straight out of the frame buffer.
+func (d *Device) receiveResponse(maxData int) ([]byte, error) {
+	total, chained := 0, false
+	for controlFrames := 0; ; {
+		control, n, err := d.nextFrame()
+		if err != nil {
+			return nil, err
+		}
+		if control {
+			if controlFrames++; controlFrames > 4 {
+				return nil, errTimeout
+			}
+			continue
+		}
+		controlFrames = 0
+
+		fragment := d.rxBuf[4 : n-2]
+		pctr := d.rxBuf[3] & pctrChainMask
+		switch {
+		case pctr == pctrChainNone && !chained:
+			return fragment, nil
+		case (pctr == pctrChainFirst && !chained) ||
+			(pctr == pctrChainIntermediate && chained):
+			// Every fragment before the last fills its frame
+			if len(fragment) != maxData {
+				return nil, errBrokenChain
+			}
+			if total+len(fragment) > len(d.rxApdu) {
+				return nil, errTooLong
+			}
+			total += copy(d.rxApdu[total:], fragment)
+			chained = true
+		case pctr == pctrChainLast && chained:
+			if total+len(fragment) > len(d.rxApdu) {
+				return nil, errTooLong
+			}
+			total += copy(d.rxApdu[total:], fragment)
+			return d.rxApdu[:total], nil
+		default:
+			return nil, errBrokenChain
+		}
+	}
+}
+
+// nextFrame reads one frame and validates its acknowledgement fields,
+// reporting whether it was a control frame. Data frames are sequence
+// checked and acknowledged before returning.
+func (d *Device) nextFrame() (control bool, n int, err error) {
+	n, err = d.readFrame()
 	if err != nil {
-		return nil, err
+		return false, 0, err
 	}
-
-	// The chip acknowledges our frame either with a control frame, or
-	// piggybacked on its response data frame; wait for the data frame
-	for attempt := 0; attempt < 4; attempt++ {
-		n, err := d.readFrame()
-		if err != nil {
-			return nil, err
-		}
-		fctr := d.rxBuf[0]
-		if fctr&fctrAckNrMask != d.txSeq {
-			return nil, errUnexpectedAck
-		}
-		seqctr := (fctr & fctrSeqctrMask) >> fctrSeqctrPos
-		if seqctr == seqctrNack {
-			return nil, errNack
-		}
-		if seqctr != seqctrAck {
-			return nil, errBadFrame
-		}
-
-		if fctr&fctrControlFrame != 0 {
-			continue // our frame was accepted, await the data frame
-		}
-		if (fctr&fctrFrameNrMask)>>fctrFrameNrPos != (d.rxSeq+1)&fctrAckNrMask {
-			return nil, errBadFrame
-		}
-		d.rxSeq = (d.rxSeq + 1) & fctrAckNrMask
-		err = d.sendAck()
-		if err != nil {
-			return nil, err
-		}
-		if d.rxBuf[3] != pctrChainNone {
-			return nil, errChained
-		}
-		return d.rxBuf[4 : n-2], nil
+	fctr := d.rxBuf[0]
+	if fctr&fctrAckNrMask != d.txSeq {
+		return false, 0, errUnexpectedAck
 	}
-	return nil, errTimeout
+	seqctr := (fctr & fctrSeqctrMask) >> fctrSeqctrPos
+	if seqctr == seqctrNack {
+		return false, 0, errNack
+	}
+	if seqctr != seqctrAck {
+		return false, 0, errBadFrame
+	}
+	if fctr&fctrControlFrame != 0 {
+		return true, n, nil
+	}
+	if (fctr&fctrFrameNrMask)>>fctrFrameNrPos != (d.rxSeq+1)&fctrAckNrMask {
+		return false, 0, errBadFrame
+	}
+	d.rxSeq = (d.rxSeq + 1) & fctrAckNrMask
+	return false, n, d.sendAck()
 }
 
 // sendAck sends a control frame acknowledging the last received data frame

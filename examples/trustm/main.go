@@ -33,6 +33,48 @@ func main() {
 	print("found OPTIGA Trust M, coprocessor UID: ")
 	printHex(uid[:])
 
+	var cert [600]byte
+	n, err := chip.GetDataObject(trustm.OID_DEVICE_CERTIFICATE, 0, cert[:])
+	if err != nil {
+		println("could not read device certificate:", err.Error())
+		return
+	}
+	println("device certificate: read", n, "bytes")
+
+	message := []byte("hello from TinyGo")
+	digest, err := chip.CalcHash(message)
+	if err != nil {
+		println("could not hash message:", err.Error())
+		return
+	}
+	print("SHA-256 of the message: ")
+	printHex(digest[:])
+
+	var pub [80]byte
+	pubLen, err := chip.GenKeyPair(trustm.OID_USER_KEY_1, trustm.P256, trustm.KeyUsageSign, pub[:])
+	if err != nil {
+		println("could not generate key pair:", err.Error())
+		return
+	}
+	print("generated P-256 key pair, public key: ")
+	printHex(pub[:pubLen])
+
+	var sig [80]byte
+	sigLen, err := chip.CalcSign(trustm.OID_USER_KEY_1, digest[:], sig[:])
+	if err != nil {
+		println("could not sign digest:", err.Error())
+		return
+	}
+	print("signature: ")
+	printHex(sig[:sigLen])
+
+	err = chip.VerifySign(trustm.P256, pub[:pubLen], digest[:], sig[:sigLen])
+	if err != nil {
+		println("could not verify signature:", err.Error())
+		return
+	}
+	println("signature verified")
+
 	var rnd [16]byte
 	for {
 		err = chip.GetRandom(rnd[:])

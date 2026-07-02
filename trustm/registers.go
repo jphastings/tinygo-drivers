@@ -43,20 +43,97 @@ const (
 const seqInit = 3
 
 // Transport layer packet control byte (PCTR): chaining status in the low
-// three bits. This driver only supports unchained packets.
-const pctrChainNone = 0x00
+// three bits. A packet larger than one frame travels as a chain of
+// first-intermediate...-last fragments. Names and values from
+// ifx_i2c_transport_layer.c in the Infineon host library.
+const (
+	pctrChainMask         = 0x07
+	pctrChainNone         = 0x00 // the packet fits in a single frame
+	pctrChainFirst        = 0x01
+	pctrChainIntermediate = 0x02
+	pctrChainLast         = 0x04
+	pctrChainError        = 0x07 // either side aborts a broken chain
+)
 
 // Command APDU codes. Bit 7 asks the chip to also clear its last error code
 // register, mirroring the Infineon host library (optiga_cmd.c):
 // https://github.com/Infineon/optiga-trust-m/blob/develop/optiga/cmd/optiga_cmd.c
 const (
 	CMD_GET_DATA_OBJECT  = 0x01 | 0x80
+	CMD_SET_DATA_OBJECT  = 0x02 | 0x80
 	CMD_GET_RANDOM       = 0x0C | 0x80
+	CMD_CALC_HASH        = 0x30 | 0x80
+	CMD_CALC_SIGN        = 0x31 | 0x80
+	CMD_VERIFY_SIGN      = 0x32 | 0x80
+	CMD_CALC_SSEC        = 0x33 | 0x80
+	CMD_GEN_KEYPAIR      = 0x38 | 0x80
 	CMD_OPEN_APPLICATION = 0x70 | 0x80
 
-	paramReadData = 0x00 // GetDataObject: read data (not metadata)
-	paramTRNG     = 0x00 // GetRandom: true random number generator
-	paramInitApp  = 0x00 // OpenApplication: initialize a clean context
+	paramReadData  = 0x00 // GetDataObject: read data (not metadata)
+	paramWriteData = 0x00 // SetDataObject: plain write at an offset
+	paramTRNG      = 0x00 // GetRandom: true random number generator
+	paramInitApp   = 0x00 // OpenApplication: initialize a clean context
+	paramSHA256    = 0xE2 // CalcHash: SHA-256 algorithm identifier
+	paramECDSA     = 0x11 // CalcSign/VerifySign: ECDSA FIPS 186-3 w/o hash
+	paramECDH      = 0x01 // CalcSSec: ECDH according to NIST SP 800-56A
+)
+
+// InData and OutData of the cryptographic commands hold TLVs: a one-byte
+// tag, a 16-bit big-endian length, then the value. Tag values from
+// optiga_cmd.c and the Solution Reference Manual command tables.
+const (
+	tagDigest    = 0x01 // CalcSign, VerifySign: the digest
+	tagSignature = 0x02 // VerifySign: the signature over the digest
+	tagSignKey   = 0x03 // CalcSign: OID of the signature key
+
+	tagPrivateKey = 0x01 // GenKeyPair, CalcSSec: OID of the private key
+	tagKeyUsage   = 0x02 // GenKeyPair: key usage identifier
+	tagAlgorithm  = 0x05 // VerifySign, CalcSSec: curve of the public key
+	tagPublicKey  = 0x06 // VerifySign, CalcSSec: external public key
+	tagExport     = 0x07 // CalcSSec: export the shared secret
+
+	tagDigestOut    = 0x01 // CalcHash response: the digest
+	tagPublicKeyOut = 0x02 // GenKeyPair response: the public key
+)
+
+// CalcHash InData starts with a sequence tag telling the chip how this
+// part of the message continues the running hash calculation
+const (
+	hashStart         = 0x00
+	hashStartAndFinal = 0x01
+	hashContinue      = 0x02
+	hashFinal         = 0x03
+)
+
+// Curve selects an ECC curve, in the chip's algorithm identifier encoding
+// (OPTIGA_ECC_CURVE_* in the Infineon host library)
+type Curve uint8
+
+const (
+	P256 Curve = 0x03 // NIST P-256
+	P384 Curve = 0x04 // NIST P-384
+)
+
+// KeyUsage restricts the operations a generated private key can be used
+// for. Values can be combined with bitwise OR.
+type KeyUsage uint8
+
+const (
+	KeyUsageAuth     KeyUsage = 0x01 // external authentication
+	KeyUsageSign     KeyUsage = 0x10 // ECDSA signature calculation
+	KeyUsageKeyAgree KeyUsage = 0x20 // ECDH key agreement
+)
+
+// Object identifiers of the ECC private key slots and the device
+// certificate. The device key and its certificate are provisioned by
+// Infineon; the user key slots are free for GenKeyPair. Private keys can
+// never be read back out of the chip.
+const (
+	OID_DEVICE_KEY         = 0xE0F0
+	OID_USER_KEY_1         = 0xE0F1
+	OID_USER_KEY_2         = 0xE0F2
+	OID_USER_KEY_3         = 0xE0F3
+	OID_DEVICE_CERTIFICATE = 0xE0E0
 )
 
 // Data object identifier of the read-only coprocessor UID, and its size.
