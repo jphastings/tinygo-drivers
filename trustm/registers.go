@@ -143,6 +143,42 @@ const (
 	UIDLength           = 27
 )
 
+// Data object identifier of the last error code. When a command fails the
+// chip stores the reason here; the code clears itself once read, and every
+// command carrying the 0x80 bit clears it before executing.
+const OID_LAST_ERROR_CODE = 0xF1C2
+
+// Error codes reported in the last error code data object after a failed
+// command, from the "Error codes" table in the Solution Reference Manual.
+// The code of the most recent failure is available from
+// Device.LastErrorCode.
+const (
+	ERR_INVALID_OID              uint8 = 0x01
+	ERR_INVALID_PARAM_FIELD      uint8 = 0x03
+	ERR_INVALID_LENGTH_FIELD     uint8 = 0x04
+	ERR_INVALID_PARAM_IN_DATA    uint8 = 0x05
+	ERR_INTERNAL_PROCESS         uint8 = 0x06
+	ERR_ACCESS_CONDITIONS        uint8 = 0x07
+	ERR_BOUNDARY_EXCEEDED        uint8 = 0x08
+	ERR_METADATA_TRUNCATION      uint8 = 0x09
+	ERR_INVALID_COMMAND_FIELD    uint8 = 0x0A
+	ERR_COMMAND_OUT_OF_SEQUENCE  uint8 = 0x0B
+	ERR_COMMAND_NOT_AVAILABLE    uint8 = 0x0C
+	ERR_INSUFFICIENT_MEMORY      uint8 = 0x0D
+	ERR_COUNTER_LIMIT_EXCEEDED   uint8 = 0x0E
+	ERR_INVALID_MANIFEST         uint8 = 0x0F
+	ERR_WRONG_PAYLOAD_VERSION    uint8 = 0x10
+	ERR_INVALID_METADATA         uint8 = 0x11
+	ERR_UNSUPPORTED_EXTENSION    uint8 = 0x24
+	ERR_UNSUPPORTED_PARAMS       uint8 = 0x25
+	ERR_INVALID_CERTIFICATE      uint8 = 0x29
+	ERR_UNSUPPORTED_CERTIFICATE  uint8 = 0x2A
+	ERR_SIGNATURE_VERIFY_FAILURE uint8 = 0x2C
+	ERR_INTEGRITY_VIOLATED       uint8 = 0x2D
+	ERR_DECRYPTION_FAILURE       uint8 = 0x2E
+	ERR_AUTHORIZATION_FAILURE    uint8 = 0x2F
+)
+
 // GetRandom accepts requests for 8 to 256 bytes of randomness
 const (
 	minRandomLength = 8

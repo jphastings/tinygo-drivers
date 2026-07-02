@@ -304,6 +304,55 @@ func TestCalcHashChunking(t *testing.T) {
 	}
 }
 
+func TestLastErrorCode(t *testing.T) {
+	chip := newFakeChip()
+	d := New(chip)
+	if err := d.Configure(); err != nil {
+		t.Fatal(err)
+	}
+
+	// A rejected signature maps to ErrSignatureInvalid
+	chip.failNext = ERR_SIGNATURE_VERIFY_FAILURE
+	digest := make([]byte, 32)
+	err := d.VerifySign(P256, chip.pubKey[:], digest, chip.sig[:])
+	if err != ErrSignatureInvalid {
+		t.Errorf("VerifySign() = %v, want ErrSignatureInvalid", err)
+	}
+	if d.LastErrorCode() != ERR_SIGNATURE_VERIFY_FAILURE {
+		t.Errorf("LastErrorCode() = %#02x, want %#02x",
+			d.LastErrorCode(), ERR_SIGNATURE_VERIFY_FAILURE)
+	}
+	if chip.errCode != 0 {
+		t.Error("reading the error code should clear it on the chip")
+	}
+
+	// The fetch must not use the clear-last-error bit, or the chip would
+	// wipe the code before answering
+	fetch := chip.packets[len(chip.packets)-1]
+	if fetch[0] != CMD_GET_DATA_OBJECT&^0x80 {
+		t.Errorf("error code fetched with command %#02x, want %#02x",
+			fetch[0], CMD_GET_DATA_OBJECT&^0x80)
+	}
+
+	// Codes without a dedicated error surface as the generic one, and a
+	// successful command resets the recorded code
+	chip.failNext = ERR_INTERNAL_PROCESS
+	var rnd [8]byte
+	if err := d.GetRandom(rnd[:]); err != errDeviceError {
+		t.Errorf("GetRandom() = %v, want errDeviceError", err)
+	}
+	if d.LastErrorCode() != ERR_INTERNAL_PROCESS {
+		t.Errorf("LastErrorCode() = %#02x, want %#02x",
+			d.LastErrorCode(), ERR_INTERNAL_PROCESS)
+	}
+	if err := d.GetRandom(rnd[:]); err != nil {
+		t.Fatal(err)
+	}
+	if d.LastErrorCode() != 0 {
+		t.Errorf("LastErrorCode() after success = %#02x, want 0", d.LastErrorCode())
+	}
+}
+
 // The fake chip reports a frame size of 0x110, so it carries this many
 // packet bytes per frame after the PCTR byte
 const chipMaxData = 0x110 - dlOverhead - 1
@@ -337,6 +386,9 @@ type fakeChip struct {
 	setOID    uint16 // what the last SetDataObject wrote
 	setOffset uint16
 	setData   []byte
+
+	failNext uint8 // fail the next command, storing this error code
+	errCode  uint8 // content of the last error code data object
 }
 
 func newFakeChip() *fakeChip {
@@ -454,6 +506,14 @@ func (f *fakeChip) receiveFrame(frame []byte) error {
 	apdu := f.rxPacket
 	f.rxPacket = nil
 	f.packets = append(f.packets, apdu)
+	if f.failNext != 0 && apdu[0]&0x80 != 0 {
+		// Fail this command; the chip stores the reason in the last
+		// error code data object
+		f.errCode, f.failNext = f.failNext, 0
+		f.resp = []byte{0xFF, 0x00, 0x00, 0x00}
+		f.nextResponseFragment()
+		return nil
+	}
 	out, err := f.handle(apdu)
 	if err != nil {
 		return err
@@ -466,6 +526,15 @@ func (f *fakeChip) receiveFrame(frame []byte) error {
 // handle answers one command APDU with its OutData
 func (f *fakeChip) handle(apdu []byte) ([]byte, error) {
 	switch apdu[0] {
+	case CMD_GET_DATA_OBJECT &^ 0x80:
+		// Reading without the clear-last-error bit: only used to fetch
+		// the last error code, which clears itself once read
+		if uint16(apdu[4])<<8|uint16(apdu[5]) != OID_LAST_ERROR_CODE {
+			return nil, errors.New("unexpected non-clearing GetDataObject")
+		}
+		code := f.errCode
+		f.errCode = 0
+		return []byte{code}, nil
 	case CMD_OPEN_APPLICATION:
 		f.opened = true
 		return nil, nil

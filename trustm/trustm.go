@@ -47,6 +47,34 @@ var (
 	errShortBuffer    = errors.New("trustm: response larger than the buffer")
 )
 
+// ErrSignatureInvalid is returned by VerifySign when the signature does not
+// verify against the digest and public key.
+var ErrSignatureInvalid = errors.New("trustm: signature verification failed")
+
+// Frequent chip-reported failures mapped to their own errors; every other
+// code surfaces as errDeviceError with the code kept in LastErrorCode
+var (
+	errAccessDenied   = errors.New("trustm: access conditions not satisfied")
+	errInvalidOID     = errors.New("trustm: invalid object identifier")
+	errObjectBoundary = errors.New("trustm: data object boundary exceeded")
+)
+
+// deviceError translates a chip error code into the error command returns
+func deviceError(code uint8) error {
+	switch code {
+	case ERR_SIGNATURE_VERIFY_FAILURE:
+		return ErrSignatureInvalid
+	case ERR_ACCESS_CONDITIONS:
+		return errAccessDenied
+	case ERR_INVALID_OID:
+		return errInvalidOID
+	case ERR_BOUNDARY_EXCEEDED:
+		return errObjectBoundary
+	default:
+		return errDeviceError
+	}
+}
+
 // The largest frame the chip can be asked to support (IFX_I2C_FRAME_SIZE in
 // the Infineon host library); the chip default is 0x110 bytes
 const maxFrameSize = 277
@@ -98,6 +126,9 @@ type Device struct {
 
 	// Frame size read back from DATA_REG_LEN during Configure
 	frameSize uint16
+
+	// Error code the chip reported for the most recent failed command
+	lastErrorCode uint8
 
 	// Data link layer frame sequence counters: last sent, last received
 	txSeq uint8
@@ -342,7 +373,7 @@ func (d *Device) CalcSign(keyOID uint16, digest, sig []byte) (int, error) {
 // supplied by the caller: the DER BIT STRING encoding of an uncompressed
 // EC point, as returned by GenKeyPair. The signature must be encoded as
 // CalcSign produces it: the two DER INTEGERs r and s without an outer
-// SEQUENCE. A signature that does not match yields an error.
+// SEQUENCE. A signature that does not match yields ErrSignatureInvalid.
 func (d *Device) VerifySign(curve Curve, publicKey, digest, sig []byte) error {
 	if d.frameSize == 0 {
 		return errNotConfigured
@@ -468,13 +499,46 @@ func (d *Device) command(cmd, param uint8, inLen int) ([]byte, error) {
 		return nil, errShortResponse
 	}
 	if resp[0] != 0x00 {
-		return nil, errDeviceError
+		return nil, d.fetchLastError()
 	}
+	d.lastErrorCode = 0
 	outLen := int(resp[2])<<8 | int(resp[3])
 	if apduHeaderSize+outLen > len(resp) {
 		return nil, errShortResponse
 	}
 	return resp[apduHeaderSize : apduHeaderSize+outLen], nil
+}
+
+// fetchLastError asks the chip why the previous command failed, by reading
+// the last error code data object, and returns the corresponding error.
+// The read uses the GetDataObject command WITHOUT the clear-last-error bit,
+// as the code would otherwise be wiped before it is read.
+func (d *Device) fetchLastError() error {
+	in := d.txApdu[apduHeaderSize:]
+	in[0] = byte(OID_LAST_ERROR_CODE >> 8)
+	in[1] = byte(OID_LAST_ERROR_CODE & 0xFF)
+	in[2], in[3] = 0, 0 // offset
+	in[4], in[5] = 0, 1 // read a single byte
+
+	d.txApdu[0] = CMD_GET_DATA_OBJECT &^ 0x80
+	d.txApdu[1] = paramReadData
+	d.txApdu[2] = 0
+	d.txApdu[3] = 6
+
+	resp, err := d.transceive(apduHeaderSize + 6)
+	if err != nil || len(resp) < apduHeaderSize+1 || resp[0] != 0x00 {
+		return errDeviceError
+	}
+	d.lastErrorCode = resp[apduHeaderSize]
+	return deviceError(d.lastErrorCode)
+}
+
+// LastErrorCode returns the error code (one of the ERR_ constants) the chip
+// reported for the most recent failed command, or zero after a successful
+// one. It distinguishes chip-reported failures beyond the errors this
+// driver maps.
+func (d *Device) LastErrorCode() uint8 {
+	return d.lastErrorCode
 }
 
 // Frame overhead of the data link layer: FCTR, 2 length bytes, 2 CRC bytes
