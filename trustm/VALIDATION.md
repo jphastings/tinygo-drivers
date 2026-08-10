@@ -1,13 +1,60 @@
-# Hardware validation plan
+# Hardware validation
 
 This driver was written and reviewed against the Infineon host library and
 the Solution Reference Manual (SRM), with all protocol behaviour tested
-against a fake chip — it has **not yet run against real silicon**. This is
-the bring-up plan for when a board (e.g. Adafruit 4351) is available.
+against a fake chip. **Every stage below has since been run against real
+silicon**, over an MCP2221A, and passed.
 
 Work through the stages in order: each one depends on the layers the
 previous stage proved, so the first failure cleanly identifies the broken
 layer.
+
+## What silicon has shown
+
+Run against an Infineon-provisioned part (firmware identifier 80101071,
+`CN=Infineon IoT Node`):
+
+- **Transport works end to end.** `Configure()` completes soft reset,
+  frame-size negotiation and the OpenApplication round trip, which
+  exercises data-link framing, the CRC, sequence counters, ACKs and APDU
+  coding in one call. DATA_REG_LEN reads 0x0115 (277 bytes).
+- **The Coprocessor UID decodes per SRM Table 76**, beginning CD 16 33 for
+  the CIM, platform and model identifiers.
+- **Inbound chaining works.** The device certificate is larger than one
+  frame and reads back intact, parsing as P-256 / ECDSA-SHA256.
+- **The 0xC0 framing assumption was right.** 0xE0E0 begins
+  `C0 01 E2 00 01 DF ...`, so the factory certificate does carry the TLS
+  identity wrapper rather than plain DER.
+- **Signing round-trips through Go and through the chip.** `crypto/ecdsa`
+  accepts a chip signature against the certificate's public key, the chip's
+  own `VerifySign` accepts it, and both reject a corrupted digest — the
+  chip reporting `ErrSignatureInvalid`.
+- **Signature padding**: the one signature captured needed no stripping
+  (both INTEGERs were minimal already). The encoding path still has to
+  handle the padded case, so how often it appears is unmeasured; capture
+  more raw `CalcSign` output before concluding it is rare.
+- **The sleep/wake behaviour is as documented.** The chip NACKs the first
+  access after roughly 20ms of bus inactivity, and `wakeRetries` carries
+  the driver through it. Anything bypassing the driver's `tx()` has to
+  repeat that retry or it will see spurious NACKs.
+
+- **Outbound chaining works** — the top-risk item, since the rule that the
+  chip ACKs every non-final fragment before accepting the next came from
+  Infineon's state machine rather than observation. A 600-byte write to
+  0xF1E0, well past the 277-byte frame size, reads back byte-identical.
+- **CalcHash sequences correctly across commands.** A 2000-byte message
+  hashed on the chip matches the host's SHA-256 of the same input.
+- **ECDH agrees with `crypto/ecdh`**, and the key can be **volatile**:
+  generating a P-256 key-agreement key into session context 0xE100
+  succeeded, and the resulting shared secret matched the host's exactly.
+  Chip-held ephemerals therefore cost no NVM endurance, which TLS.md had
+  flagged as an open question.
+
+Only the chaining stage writes NVM, and only into an arbitrary data
+object. Nothing here needs a key slot, metadata write, or lifecycle
+transition — and the factory key in 0xE0F0 should be left alone whatever
+else is tested, since overwriting it strands the device certificate that
+verifies its signatures.
 
 ## Stages
 

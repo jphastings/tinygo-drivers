@@ -4,10 +4,10 @@
 // coprocessor. Written against boards such as the Adafruit breakout:
 // https://www.adafruit.com/product/4351
 //
-// This driver has been written and reviewed against the Infineon host
-// library and the Solution Reference Manual, and tested against a fake chip
-// implementing the protocol, but it has not yet been run against real
-// silicon. See VALIDATION.md for the bring-up plan.
+// Every stage of the bring-up plan in VALIDATION.md has been run against
+// real silicon, including packet chaining in both directions, hashing
+// sequenced across commands, and key agreement cross-checked against Go's
+// crypto/ecdh.
 //
 // Only a subset of the chip's functionality is implemented: the Infineon
 // I2C protocol transport including packet chaining, opening the
