@@ -123,6 +123,11 @@ func (d *Device) SetDebounceTime(ms uint16) error {
 // Granularity is the brightness step per pulse update; 1 is fine for most
 // applications.
 func (d *Device) LEDConfig(brightness uint8, cycleTime, offTime uint16, granularity uint8) error {
+	if granularity == 0 {
+		// The firmware divides the brightness range by granularity to compute
+		// its pulse steps, so 0 would make it divide by zero.
+		granularity = 1
+	}
 	if err := d.writeRegister(REG_LED_BRIGHTNESS, brightness); err != nil {
 		return err
 	}

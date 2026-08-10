@@ -148,6 +148,19 @@ func TestLEDConfig(t *testing.T) {
 	}
 }
 
+func TestLEDConfigZeroGranularity(t *testing.T) {
+	fake, d := configured(t)
+
+	// The firmware divides by granularity to size its pulse steps, so a
+	// zero granularity must not reach the wire.
+	if err := d.LEDConfig(128, 1000, 500, 0); err != nil {
+		t.Fatal(err)
+	}
+	if fake.regs[REG_LED_PULSE_GRANULARITY] != 1 {
+		t.Errorf("granularity = %d, want 1", fake.regs[REG_LED_PULSE_GRANULARITY])
+	}
+}
+
 func TestConfigure(t *testing.T) {
 	fake := newFakeButton()
 	fake.regs[REG_BUTTON_STATUS] = statusEventAvailable | statusHasBeenClicked
