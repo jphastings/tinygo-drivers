@@ -4,10 +4,10 @@
 // coprocessor. Written against boards such as the Adafruit breakout:
 // https://www.adafruit.com/product/4351
 //
-// The transport, the certificate read and the signing path have been run
-// against real silicon; outbound chaining, CalcHash sequencing and ECDH
-// have not, because each needs a write to the chip's NVM. VALIDATION.md
-// records what silicon has shown and what is still outstanding.
+// Every stage of the bring-up plan in VALIDATION.md has been run against
+// real silicon, including packet chaining in both directions, hashing
+// sequenced across commands, and key agreement cross-checked against Go's
+// crypto/ecdh.
 //
 // Only a subset of the chip's functionality is implemented: the Infineon
 // I2C protocol transport including packet chaining, opening the

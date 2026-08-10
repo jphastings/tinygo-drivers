@@ -95,10 +95,11 @@ alternative where peers negotiate P-256 or policy demands chip-held
 ephemerals. Its caveats:
 
 - `GenKeyPair` into 0xE0F1–0xE0F3 writes NVM — wrong for per-connection
-  ephemerals (endurance). The chip has volatile **session contexts
-  0xE100–0xE103** for exactly this; the driver passes any OID through,
-  but session-context keys are unvalidated — test on silicon, and if
-  they work, use them.
+  ephemerals (endurance). Use the volatile **session contexts
+  0xE100–0xE103** instead: generating a P-256 key-agreement key into
+  0xE100 and running `ECDH` against a host peer key has been confirmed
+  on silicon, and the shared secret matched Go's `crypto/ecdh` exactly.
+  So chip-held ephemerals cost no NVM endurance at all.
 - Without the shielded connection the ECDH secret crosses the I2C bus
   in plaintext (see SHIELDED_CONNECTION.md). If bus probing is in the
   threat model, implement shielded first — or stay with host ephemerals.

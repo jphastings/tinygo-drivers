@@ -2,8 +2,8 @@
 
 This driver was written and reviewed against the Infineon host library and
 the Solution Reference Manual (SRM), with all protocol behaviour tested
-against a fake chip. Stages 1-5, 8 and 10 below have since been run against
-real silicon, over an MCP2221A; the rest are still outstanding.
+against a fake chip. **Every stage below has since been run against real
+silicon**, over an MCP2221A, and passed.
 
 Work through the stages in order: each one depends on the layers the
 previous stage proved, so the first failure cleanly identifies the broken
@@ -38,10 +38,23 @@ Run against an Infineon-provisioned part (firmware identifier 80101071,
   the driver through it. Anything bypassing the driver's `tx()` has to
   repeat that retry or it will see spurious NACKs.
 
-Still unproven, all because each needs an NVM write, which risks the
-chip's limited write endurance and its lifecycle state: **outbound
-chaining** (stage 6, still the top risk), **CalcHash sequencing** (stage 7)
-and **ECDH** (stage 9).
+- **Outbound chaining works** — the top-risk item, since the rule that the
+  chip ACKs every non-final fragment before accepting the next came from
+  Infineon's state machine rather than observation. A 600-byte write to
+  0xF1E0, well past the 277-byte frame size, reads back byte-identical.
+- **CalcHash sequences correctly across commands.** A 2000-byte message
+  hashed on the chip matches the host's SHA-256 of the same input.
+- **ECDH agrees with `crypto/ecdh`**, and the key can be **volatile**:
+  generating a P-256 key-agreement key into session context 0xE100
+  succeeded, and the resulting shared secret matched the host's exactly.
+  Chip-held ephemerals therefore cost no NVM endurance, which TLS.md had
+  flagged as an open question.
+
+Only the chaining stage writes NVM, and only into an arbitrary data
+object. Nothing here needs a key slot, metadata write, or lifecycle
+transition — and the factory key in 0xE0F0 should be left alone whatever
+else is tested, since overwriting it strands the device certificate that
+verifies its signatures.
 
 ## Stages
 
