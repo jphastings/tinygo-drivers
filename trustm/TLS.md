@@ -107,8 +107,7 @@ ephemerals. Its caveats:
 
 The host share of the handshake (record encryption, HKDF, transcript
 hashing) runs in software on a single 160MHz RISC-V core; TinyGo has no
-driver for the C3's AES/SHA accelerators (one would be a separate
-tinygo-drivers contribution).
+driver for the C3's AES/SHA accelerators (yet).
 
 - **Cipher suites**: prefer `TLS_CHACHA20_POLY1305_SHA256` — ChaCha20 is
   designed to be fast in software, and constant-time software AES is not.
