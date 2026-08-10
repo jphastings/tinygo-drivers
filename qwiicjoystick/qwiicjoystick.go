@@ -81,7 +81,8 @@ type Device struct {
 	buf [5]byte
 }
 
-// Config holds settings applied by Configure.
+// Config holds settings applied by Configure. All three fields can also be
+// changed later, without a full reconfigure, via SetRotation and SetMirror.
 type Config struct {
 	// Rotation compensates Position for how the board is physically
 	// mounted, applied after axis normalization and before any mirroring.
@@ -125,9 +126,10 @@ func (d *Device) Configure(cfg Config) error {
 	if !d.Connected() {
 		return errNotConnected
 	}
-	d.rotation = cfg.Rotation
-	d.mirrorHorizontal = cfg.MirrorHorizontal
-	d.mirrorVertical = cfg.MirrorVertical
+	if err := d.SetRotation(cfg.Rotation); err != nil {
+		return err
+	}
+	d.SetMirror(cfg.MirrorHorizontal, cfg.MirrorVertical)
 	return d.ClearEventBits()
 }
 
@@ -198,16 +200,36 @@ func (d *Device) Position() (x, y int16, err error) {
 // SetRotation changes the rotation Position applies on top of its axis
 // correction, without touching the hardware - useful for correcting the
 // mounting at runtime, e.g. from a settings menu, without a full Configure.
-func (d *Device) SetRotation(r Rotation) {
+// It returns errInvalidRotation, leaving the current rotation unchanged,
+// if r is not one of the four declared Rotation constants.
+func (d *Device) SetRotation(r Rotation) error {
+	if !r.valid() {
+		return errInvalidRotation
+	}
 	d.rotation = r
+	return nil
+}
+
+// Rotation returns the rotation most recently applied by Configure or
+// SetRotation.
+func (d *Device) Rotation() Rotation {
+	return d.rotation
 }
 
 // SetMirror changes the axis mirroring Position applies after Rotation,
 // without touching the hardware. See Config.MirrorHorizontal and
-// Config.MirrorVertical for what horizontal and vertical mean here.
+// Config.MirrorVertical for what horizontal and vertical mean here. There
+// is nothing to validate - any combination of the two bools is valid - so,
+// unlike SetRotation, this cannot fail.
 func (d *Device) SetMirror(horizontal, vertical bool) {
 	d.mirrorHorizontal = horizontal
 	d.mirrorVertical = vertical
+}
+
+// Mirror returns the axis mirroring most recently applied by Configure or
+// SetMirror.
+func (d *Device) Mirror() (horizontal, vertical bool) {
+	return d.mirrorHorizontal, d.mirrorVertical
 }
 
 // IsPressed returns whether the button is currently held down. The

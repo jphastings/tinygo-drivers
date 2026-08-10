@@ -1,5 +1,7 @@
 package qwiicjoystick
 
+import "errors"
+
 // Rotation compensates Position for how the board is physically mounted: set
 // it to the angle, clockwise in 90 degree steps, that the board was turned
 // away from its reference orientation (silkscreen text upright) before it
@@ -12,10 +14,6 @@ package qwiicjoystick
 // Rotation0, the reference orientation, is also Rotation's zero value: an
 // unset Config or a Device that never calls SetRotation applies no extra
 // rotation on top of the normalized axes.
-//
-// A Rotation value outside the four declared constants is treated as
-// Rotation0 (no extra rotation) rather than rejected, since setting it never
-// touches the hardware and so can never itself fail.
 type Rotation uint8
 
 const (
@@ -24,6 +22,16 @@ const (
 	Rotation180
 	Rotation270
 )
+
+var errInvalidRotation = errors.New("qwiicjoystick: invalid rotation")
+
+func (r Rotation) valid() bool {
+	switch r {
+	case Rotation0, Rotation90, Rotation180, Rotation270:
+		return true
+	}
+	return false
+}
 
 // apply rotates a normalized (x, y) reading to compensate for the mounting
 // Rotation describes.

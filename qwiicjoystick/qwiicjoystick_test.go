@@ -210,7 +210,9 @@ func TestPositionRotation(t *testing.T) {
 
 	for _, c := range cases {
 		fake, d := configured(t)
-		d.SetRotation(c.rotation)
+		if err := d.SetRotation(c.rotation); err != nil {
+			t.Fatal(err)
+		}
 		fake.setRawPosition(1023, Center)
 
 		x, y, err := d.Position()
@@ -220,6 +222,66 @@ func TestPositionRotation(t *testing.T) {
 		if x != c.wantX || y != c.wantY {
 			t.Errorf("Position() with rotation %d = %d, %d; want %d, %d", c.rotation, x, y, c.wantX, c.wantY)
 		}
+	}
+}
+
+// TestSetRotationRejectsInvalidValue proves SetRotation validates its
+// argument, like tsl2591.SetGain, and leaves the previous rotation in place
+// - rather than silently accepting a value outside the four declared
+// constants - when it does.
+func TestSetRotationRejectsInvalidValue(t *testing.T) {
+	_, d := configured(t)
+	if err := d.SetRotation(Rotation90); err != nil {
+		t.Fatal(err)
+	}
+
+	if err := d.SetRotation(Rotation(0xFF)); err != errInvalidRotation {
+		t.Errorf("SetRotation(invalid) = %v, want errInvalidRotation", err)
+	}
+	if got := d.Rotation(); got != Rotation90 {
+		t.Errorf("Rotation() after rejected SetRotation = %v, want unchanged Rotation90", got)
+	}
+}
+
+// TestConfigureRejectsInvalidRotation proves Configure validates
+// cfg.Rotation before touching the hardware: an invalid rotation must leave
+// REG_STATUS - which a successful Configure always clears - untouched.
+func TestConfigureRejectsInvalidRotation(t *testing.T) {
+	fake := newFakeJoystick()
+	fake.regs[REG_STATUS] = 1
+
+	d := New(fake, DefaultAddress)
+	if err := d.Configure(Config{Rotation: Rotation(0xFF)}); err != errInvalidRotation {
+		t.Errorf("Configure with invalid rotation = %v, want errInvalidRotation", err)
+	}
+	if fake.regs[REG_STATUS] != 1 {
+		t.Errorf("status after rejected Configure = %d, want unchanged 1", fake.regs[REG_STATUS])
+	}
+}
+
+// TestRotationAndMirrorGetters pins Rotation and Mirror against the values
+// most recently passed to SetRotation/SetMirror, including their zero-value
+// defaults.
+func TestRotationAndMirrorGetters(t *testing.T) {
+	_, d := configured(t)
+
+	if got := d.Rotation(); got != Rotation0 {
+		t.Errorf("Rotation() default = %v, want Rotation0", got)
+	}
+	if h, v := d.Mirror(); h || v {
+		t.Errorf("Mirror() default = %v, %v; want false, false", h, v)
+	}
+
+	if err := d.SetRotation(Rotation270); err != nil {
+		t.Fatal(err)
+	}
+	d.SetMirror(true, false)
+
+	if got := d.Rotation(); got != Rotation270 {
+		t.Errorf("Rotation() = %v, want Rotation270", got)
+	}
+	if h, v := d.Mirror(); !h || v {
+		t.Errorf("Mirror() = %v, %v; want true, false", h, v)
 	}
 }
 
@@ -274,7 +336,9 @@ func TestMirrorBothEqualsRotation180(t *testing.T) {
 	fakeA.setRawPosition(Center, 1023)
 
 	fakeB, dB := configured(t)
-	dB.SetRotation(Rotation180)
+	if err := dB.SetRotation(Rotation180); err != nil {
+		t.Fatal(err)
+	}
 	fakeB.setRawPosition(Center, 1023)
 
 	xA, yA, errA := dA.Position()
@@ -298,7 +362,9 @@ func TestMirrorBothEqualsRotation180(t *testing.T) {
 // fails this test instead of passing unnoticed.
 func TestRotationThenMirrorOrder(t *testing.T) {
 	fake, d := configured(t)
-	d.SetRotation(Rotation90)
+	if err := d.SetRotation(Rotation90); err != nil {
+		t.Fatal(err)
+	}
 	d.SetMirror(true, false)
 
 	// Raw (612, 812): normalized (300, 100). Rotate90 -> (100, -300).
