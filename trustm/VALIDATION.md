@@ -1,13 +1,47 @@
-# Hardware validation plan
+# Hardware validation
 
 This driver was written and reviewed against the Infineon host library and
 the Solution Reference Manual (SRM), with all protocol behaviour tested
-against a fake chip — it has **not yet run against real silicon**. This is
-the bring-up plan for when a board (e.g. Adafruit 4351) is available.
+against a fake chip. Stages 1-5, 8 and 10 below have since been run against
+real silicon, over an MCP2221A; the rest are still outstanding.
 
 Work through the stages in order: each one depends on the layers the
 previous stage proved, so the first failure cleanly identifies the broken
 layer.
+
+## What silicon has shown
+
+Run against an Infineon-provisioned part (firmware identifier 80101071,
+`CN=Infineon IoT Node`):
+
+- **Transport works end to end.** `Configure()` completes soft reset,
+  frame-size negotiation and the OpenApplication round trip, which
+  exercises data-link framing, the CRC, sequence counters, ACKs and APDU
+  coding in one call. DATA_REG_LEN reads 0x0115 (277 bytes).
+- **The Coprocessor UID decodes per SRM Table 76**, beginning CD 16 33 for
+  the CIM, platform and model identifiers.
+- **Inbound chaining works.** The device certificate is larger than one
+  frame and reads back intact, parsing as P-256 / ECDSA-SHA256.
+- **The 0xC0 framing assumption was right.** 0xE0E0 begins
+  `C0 01 E2 00 01 DF ...`, so the factory certificate does carry the TLS
+  identity wrapper rather than plain DER.
+- **Signing round-trips through Go and through the chip.** `crypto/ecdsa`
+  accepts a chip signature against the certificate's public key, the chip's
+  own `VerifySign` accepts it, and both reject a corrupted digest — the
+  chip reporting `ErrSignatureInvalid`.
+- **Signature padding**: the one signature captured needed no stripping
+  (both INTEGERs were minimal already). The encoding path still has to
+  handle the padded case, so how often it appears is unmeasured; capture
+  more raw `CalcSign` output before concluding it is rare.
+- **The sleep/wake behaviour is as documented.** The chip NACKs the first
+  access after roughly 20ms of bus inactivity, and `wakeRetries` carries
+  the driver through it. Anything bypassing the driver's `tx()` has to
+  repeat that retry or it will see spurious NACKs.
+
+Still unproven, all because each needs an NVM write, which risks the
+chip's limited write endurance and its lifecycle state: **outbound
+chaining** (stage 6, still the top risk), **CalcHash sequencing** (stage 7)
+and **ECDH** (stage 9).
 
 ## Stages
 
