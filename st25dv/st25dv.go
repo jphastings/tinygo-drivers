@@ -67,14 +67,14 @@ func (d *Device) Configure() error {
 		return errNotConnected
 	}
 
-	// Memory size is stored as the last block number plus the block size
-	// minus one
+	// MEM_SIZE holds the last block number (0-based) and BLK_SIZE the block
+	// size in bytes, both minus one
 	var raw [3]byte
 	err := d.readRegister(AddressSystem, REG_MEM_SIZE_LSB, raw[:])
 	if err != nil {
 		return err
 	}
-	blocks := uint32(raw[1])<<8 | uint32(raw[0]) + 1
+	blocks := (uint32(raw[1])<<8 | uint32(raw[0])) + 1
 	d.memSize = blocks * (uint32(raw[2]) + 1)
 
 	return nil
