@@ -11,6 +11,47 @@
 // This driver is inspired by the SparkFun Arduino library:
 //
 //	https://github.com/sparkfun/SparkFun_Qwiic_Joystick_Arduino_Library
+//
+// # Orientation
+//
+// Measured on a real board with the "SparkFun" silkscreen text upright, a
+// physical push up increases the firmware's raw X reading and a push right
+// increases its raw Y reading - the firmware's own axes are transposed from
+// what a caller expects. RawPosition reports those raw values exactly as
+// read. Position corrects the transposition, so that with the board
+// mounted silkscreen-up (the reference orientation), pushing right reads
+// positive X and pushing up reads positive Y.
+//
+// If the board is mounted some other way round, set Config.Rotation (or
+// call SetRotation later) to the clockwise angle, in 90 degree steps, that
+// the board was turned away from silkscreen-up before installation.
+// Position then applies that rotation on top of the axis correction above,
+// so a push in a given physical direction reads the same way regardless of
+// which of the four ways the board was mounted, once Rotation matches it.
+// Center is 512; the example below uses a partial deflection of 200 to
+// keep the numbers symmetric (the raw range's actual extremes, 0 and 1023,
+// are offset -512 and +511 from Center, not symmetric):
+//
+//	Rotation     Push      RawPosition()   Position()
+//	Rotation0    Up        (712, 512)      (0, +200)
+//	Rotation0    Right     (512, 712)      (+200, 0)
+//	Rotation90   Up        (512, 312)      (0, +200)
+//	Rotation90   Right     (712, 512)      (+200, 0)
+//	Rotation180  Up        (312, 512)      (0, +200)
+//	Rotation180  Right     (512, 312)      (+200, 0)
+//	Rotation270  Up        (512, 712)      (0, +200)
+//	Rotation270  Right     (312, 512)      (+200, 0)
+//
+// Config.MirrorHorizontal and Config.MirrorVertical (or SetMirror) flip
+// Position's X and Y axes respectively, applied after Rotation, in the
+// direction the caller actually sees - so MirrorHorizontal always means
+// "flip the left/right axis I see", regardless of Rotation. For example,
+// RawPosition (512, 712) above ("push right" at Rotation0) reads Position
+// (+200, 0) unmirrored but (-200, 0) with MirrorHorizontal set. Mirroring
+// both axes together is equivalent to an additional Rotation180 - e.g. that
+// same reading with Rotation0 plus both mirrors set, or with Rotation180
+// alone and no mirroring, both read (-200, 0) - so of the sixteen nominal
+// Rotation/mirror combinations, only eight are actually distinct.
 package qwiicjoystick
 
 import (
@@ -32,9 +73,30 @@ type Device struct {
 	// unless it has been reconfigured.
 	Address uint8
 
+	rotation                         Rotation
+	mirrorHorizontal, mirrorVertical bool
+
 	// Scratch buffer: register address plus up to four data bytes (the
 	// X/Y position registers, read in one burst).
 	buf [5]byte
+}
+
+// Config holds settings applied by Configure.
+type Config struct {
+	// Rotation compensates Position for how the board is physically
+	// mounted, applied after axis normalization and before any mirroring.
+	// The zero value, Rotation0, applies no extra rotation. See Rotation
+	// and the package doc for the convention and a worked example.
+	Rotation Rotation
+
+	// MirrorHorizontal and MirrorVertical flip Position's X and Y axes,
+	// applied after Rotation in the direction the caller actually sees -
+	// so MirrorHorizontal always means "flip the left/right axis I see",
+	// regardless of Rotation. Both false, the zero value, applies no
+	// mirroring. Setting both is equivalent to an additional Rotation180;
+	// see the package doc.
+	MirrorHorizontal bool
+	MirrorVertical   bool
 }
 
 // New creates a new Qwiic Joystick connection. The I2C bus must already be
@@ -56,13 +118,16 @@ func (d *Device) Connected() bool {
 	return err == nil && id == DeviceID
 }
 
-// Configure checks the device is responding and clears any latched button
-// press, so a program starts from a known state regardless of what
-// happened before it ran.
-func (d *Device) Configure() error {
+// Configure checks the device is responding, applies cfg, and clears any
+// latched button press, so a program starts from a known state regardless
+// of what happened before it ran.
+func (d *Device) Configure(cfg Config) error {
 	if !d.Connected() {
 		return errNotConnected
 	}
+	d.rotation = cfg.Rotation
+	d.mirrorHorizontal = cfg.MirrorHorizontal
+	d.mirrorVertical = cfg.MirrorVertical
 	return d.ClearEventBits()
 }
 
@@ -78,9 +143,15 @@ func (d *Device) FirmwareVersion() (major, minor uint8, err error) {
 }
 
 // RawPosition reads the stick's raw 10-bit ADC position: 0-1023 on each
-// axis, with Center (512) at rest. Which physical direction increases X or
-// Y, and which axis is which, depends on how the board is mounted; use
-// Position for a version already centered on zero.
+// axis, with Center (512) at rest. It is completely untransformed: unlike
+// Position, it is never centered, axis-corrected, rotated or mirrored, so
+// calibrating or debugging code can see exactly what the firmware sent.
+//
+// In particular its X and Y are not the same axes Position reports: the
+// firmware's raw X increases when the stick is pushed physically up and its
+// raw Y increases when pushed physically right, the opposite of what
+// RawPosition's own axis names suggest. See the package doc for the
+// measurement behind this and how Position corrects it.
 func (d *Device) RawPosition() (x, y uint16, err error) {
 	d.buf[0] = REG_X_MSB
 	if err = d.bus.Tx(uint16(d.Address), d.buf[:1], d.buf[1:5]); err != nil {
@@ -96,15 +167,47 @@ func (d *Device) RawPosition() (x, y uint16, err error) {
 	return x, y, nil
 }
 
-// Position is RawPosition expressed as a signed offset from rest, roughly
-// -512 to 511 with 0 at rest, so callers can act on direction and
-// magnitude without first subtracting Center themselves.
+// Position is RawPosition centered on zero (roughly -512 to 511, 0 at
+// rest), axis-corrected, rotated and mirrored, in that order, so callers
+// can treat X as left/right and Y as up/down consistently regardless of how
+// the board is wired, mounted, or configured. See the package doc for the
+// axis correction this always applies and a worked example of Rotation and
+// mirroring on top of it.
 func (d *Device) Position() (x, y int16, err error) {
 	rawX, rawY, err := d.RawPosition()
 	if err != nil {
 		return 0, 0, err
 	}
-	return int16(rawX) - int16(Center), int16(rawY) - int16(Center), nil
+
+	// The firmware's raw X tracks up/down and raw Y tracks left/right - see
+	// RawPosition - so correcting to the usual X=left/right, Y=up/down
+	// convention swaps them, not just centers them.
+	x, y = int16(rawY)-int16(Center), int16(rawX)-int16(Center)
+
+	x, y = d.rotation.apply(x, y)
+
+	if d.mirrorHorizontal {
+		x = -x
+	}
+	if d.mirrorVertical {
+		y = -y
+	}
+	return x, y, nil
+}
+
+// SetRotation changes the rotation Position applies on top of its axis
+// correction, without touching the hardware - useful for correcting the
+// mounting at runtime, e.g. from a settings menu, without a full Configure.
+func (d *Device) SetRotation(r Rotation) {
+	d.rotation = r
+}
+
+// SetMirror changes the axis mirroring Position applies after Rotation,
+// without touching the hardware. See Config.MirrorHorizontal and
+// Config.MirrorVertical for what horizontal and vertical mean here.
+func (d *Device) SetMirror(horizontal, vertical bool) {
+	d.mirrorHorizontal = horizontal
+	d.mirrorVertical = vertical
 }
 
 // IsPressed returns whether the button is currently held down. The

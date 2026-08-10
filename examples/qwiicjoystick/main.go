@@ -17,7 +17,10 @@ func main() {
 
 	joystick := qwiicjoystick.New(bus, qwiicjoystick.DefaultAddress)
 
-	err = joystick.Configure()
+	// If this board is mounted rotated relative to its silkscreen-upright
+	// reference orientation, set Rotation here so Position reports up/down/
+	// left/right correctly - see the qwiicjoystick package doc.
+	err = joystick.Configure(qwiicjoystick.Config{Rotation: qwiicjoystick.Rotation0})
 	if err != nil {
 		println("could not configure qwiicjoystick driver:", err.Error())
 		return
