@@ -78,6 +78,12 @@ func (d *Device) Configure(cfg Config) error {
 	if err := d.SoftwareReset(); err != nil {
 		return err
 	}
+	// How the sensing elements are magnetized survives a software reset — it
+	// is a physical state, not a register — and a RESET inverts every axis.
+	// SET them so that readings have a defined sign whatever ran beforehand.
+	if err := d.PerformSet(); err != nil {
+		return err
+	}
 	return d.SetBandwidth(cfg.Bandwidth)
 }
 

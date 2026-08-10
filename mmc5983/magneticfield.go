@@ -19,6 +19,11 @@ const (
 // This single reading includes the sensor's own bridge offset, which drifts
 // with temperature; for an accurate reading, prefer ReadMagneticFieldSetReset.
 //
+// The sign of the result depends on how the sensing elements are magnetized:
+// a RESET inverts every axis until the next SET. Configure leaves them SET,
+// and every method here that pulses them restores that, so callers only need
+// to care if they call PerformReset themselves.
+//
 // Please note: to properly correct and calibrate the X, Y and Z channels,
 // you need to determine true offsets (zero points) and scale factors
 // (gains) for all three channels. Further details can be found at:
@@ -54,6 +59,13 @@ func (d *Device) ReadMagneticFieldSetReset() (x, y, z int32, err error) {
 	}
 	xReset, yReset, zReset, err := d.measureXYZ()
 	if err != nil {
+		return 0, 0, 0, err
+	}
+
+	// Leave the elements SET again. A RESET inverts every later reading, so
+	// without this a single call here would silently flip the sign of every
+	// subsequent ReadMagneticField.
+	if err := d.PerformSet(); err != nil {
 		return 0, 0, 0, err
 	}
 

@@ -159,12 +159,14 @@ func TestReadMagneticFieldSetReset(t *testing.T) {
 	}
 
 	// The datasheet's offset-cancellation procedure is: SET, measure, RESET,
-	// measure.
+	// measure — then a SET, because leaving the elements RESET would invert
+	// every later reading.
 	want := []write{
 		{INT_CTRL_0_REG, BITS_SET_OPERATION},
 		{INT_CTRL_0_REG, BITS_TM_M},
 		{INT_CTRL_0_REG, BITS_RESET_OPERATION},
 		{INT_CTRL_0_REG, BITS_TM_M},
+		{INT_CTRL_0_REG, BITS_SET_OPERATION},
 	}
 	if len(fake.writes) != len(want) {
 		t.Fatalf("control register writes = %v, want %v", fake.writes, want)
@@ -225,8 +227,11 @@ func TestConfigureResetsAndSetsBandwidth(t *testing.T) {
 		t.Fatal(err)
 	}
 
+	// The SET matters: magnetization survives the software reset, and elements
+	// left RESET by earlier use would invert every reading.
 	want := []write{
 		{INT_CTRL_1_REG, BITS_SW_RST},
+		{INT_CTRL_0_REG, BITS_SET_OPERATION},
 		{INT_CTRL_1_REG, BITS_BW1}, // 400Hz: BW[1:0] = 0b10, on a clean shadow
 	}
 	if len(fake.writes) != len(want) {
