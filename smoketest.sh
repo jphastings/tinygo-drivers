@@ -94,6 +94,7 @@ tinygo build -size short -o ./build/test.hex -target=pico ./examples/waveshare-e
 tinygo build -size short -o ./build/test.hex -target=circuitplay-express ./examples/ws2812
 tinygo build -size short -o ./build/test.bin -target=m5stamp-c3          ./examples/ws2812
 tinygo build -size short -o ./build/test.hex -target=feather-nrf52840 ./examples/is31fl3731/main.go
+tinygo build -size short -o ./build/test.hex -target=feather-nrf52840 ./examples/is31fl3741/main.go
 tinygo build -size short -o ./build/test.hex -target=feather-nrf52840 ./examples/vk16k33/main.go
 tinygo build -size short -o ./build/test.hex -target=arduino   ./examples/ws2812
 tinygo build -size short -o ./build/test.hex -target=digispark ./examples/ws2812
