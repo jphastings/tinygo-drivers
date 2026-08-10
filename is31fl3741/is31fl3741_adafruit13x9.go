@@ -14,12 +14,12 @@ import (
 // pixel when the board is oriented with its silkscreen text upright, same
 // as the Adafruit CircuitPython and Arduino drivers. This is the reference
 // orientation SetRotation and SetMirror compensate from; see Rotation and
-// Mirror.
+// SetMirror.
 type DeviceAdafruitRGBMatrixQT13x9 struct {
 	Device
 
-	rotation Rotation
-	mirror   Mirror
+	rotation                         Rotation
+	mirrorHorizontal, mirrorVertical bool
 }
 
 var _ drivers.Displayer = (*DeviceAdafruitRGBMatrixQT13x9)(nil)
@@ -40,7 +40,7 @@ func NewAdafruitRGBMatrixQT13x9(bus drivers.I2C, address uint8) DeviceAdafruitRG
 }
 
 // Size returns the dimensions of the LED matrix as currently rotated; see
-// Rotation. Mirroring does not affect the reported size.
+// Rotation. SetMirror does not affect the reported size.
 func (d *DeviceAdafruitRGBMatrixQT13x9) Size() (x, y int16) {
 	if d.rotation == Rotation90 || d.rotation == Rotation270 {
 		return panelHeight, panelWidth
@@ -51,7 +51,7 @@ func (d *DeviceAdafruitRGBMatrixQT13x9) Size() (x, y int16) {
 // SetPixel sets the color of a single pixel in the internal buffer, call
 // Display to send it to the board. The alpha channel is ignored, pixels out
 // of range are ignored. Coordinates are in the panel's current, as-mounted
-// and mirrored orientation; see Rotation and Mirror.
+// and mirrored orientation; see Rotation and SetMirror.
 func (d *DeviceAdafruitRGBMatrixQT13x9) SetPixel(x, y int16, c color.RGBA) {
 	x, y, ok := d.toPanel(x, y)
 	if !ok {

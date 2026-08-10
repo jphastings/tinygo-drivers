@@ -4,7 +4,7 @@ import "errors"
 
 // Reference dimensions of the Adafruit 13x9 RGB Matrix QT panel, with its
 // silkscreen text upright: column (x) increasing to the right, row (y)
-// increasing downwards. Rotation and Mirror remap caller coordinates onto
+// increasing downwards. Rotation and SetMirror remap caller coordinates onto
 // this frame.
 const (
 	panelWidth  = 13
@@ -20,7 +20,7 @@ const (
 // it is actually mounted, x increasing to the right and y increasing
 // downwards. Set the rotation once to match how the board is mounted, then
 // draw as if that were the only orientation that existed - the driver remaps
-// onto the wiring underneath. See Mirror for how mirroring composes with
+// onto the wiring underneath. See SetMirror for how mirroring composes with
 // rotation.
 //
 // The zero value, Rotation0, is the identity: no compensation is applied.
@@ -61,50 +61,6 @@ func (r Rotation) valid() bool {
 	return false
 }
 
-// Mirror flips SetPixel's caller coordinates along one or both axes, on top
-// of whatever Rotation is in force. MirrorHorizontal and MirrorVertical can
-// be combined with a bitwise OR.
-//
-// Mirroring is defined in the caller's frame, applied after rotation: it
-// flips the axis the caller is currently drawing along, not an axis of the
-// physical panel. "Mirror horizontally" always swaps left and right as the
-// caller sees them, whatever Rotation is set to; it does not, for example,
-// flip top and bottom just because a 90° rotation is also in force.
-//
-// Worked example: a 13x9 panel at Rotation90 presents to the caller as 9
-// wide, 13 tall (see Rotation). A pixel drawn at the caller's top-right
-// corner, (8, 0):
-//
-//	Rotation90 alone:                  bottom-left of the silkscreen-upright panel
-//	Rotation90 | MirrorHorizontal:     top-left (MirrorHorizontal swaps the caller's
-//	                                   left/right, moving the drawn point from the
-//	                                   caller's top-right to top-left before rotating)
-//
-// A panel viewed from behind through a diffuser, for instance, is mirrored
-// on both axes at once: MirrorHorizontal | MirrorVertical. That combination
-// is equivalent to Rotation180 with no mirroring - flipping both axes is the
-// same transform as a half turn - so the 16 nominal (Rotation, Mirror)
-// combinations only produce 8 distinct orientations. That's expected, not a
-// bug: don't be surprised to find two settings that behave identically.
-//
-// The zero value, MirrorNone, is the identity: no flip is applied.
-type Mirror uint8
-
-const (
-	// MirrorNone applies no flip. This is the zero value.
-	MirrorNone Mirror = 0
-	// MirrorHorizontal flips the caller's left/right axis.
-	MirrorHorizontal Mirror = 1 << 0
-	// MirrorVertical flips the caller's top/bottom axis.
-	MirrorVertical Mirror = 1 << 1
-)
-
-var errInvalidMirror = errors.New("is31fl3741: invalid mirror")
-
-func (m Mirror) valid() bool {
-	return m&^(MirrorHorizontal|MirrorVertical) == 0
-}
-
 // SetRotation sets how the panel is physically mounted; see Rotation for how
 // this affects SetPixel and Size.
 func (d *DeviceAdafruitRGBMatrixQT13x9) SetRotation(r Rotation) error {
@@ -120,19 +76,42 @@ func (d *DeviceAdafruitRGBMatrixQT13x9) Rotation() Rotation {
 	return d.rotation
 }
 
-// SetMirror sets which axes SetPixel's coordinates are flipped along; see
-// Mirror for how this composes with rotation.
-func (d *DeviceAdafruitRGBMatrixQT13x9) SetMirror(m Mirror) error {
-	if !m.valid() {
-		return errInvalidMirror
-	}
-	d.mirror = m
-	return nil
+// SetMirror flips SetPixel's caller coordinates along one or both axes, on
+// top of whatever Rotation is in force.
+//
+// Mirroring is defined in the caller's frame, applied after rotation: it
+// flips the axis the caller is currently drawing along, not an axis of the
+// physical panel. horizontal always swaps left and right as the caller sees
+// them, whatever Rotation is set to; it does not, for example, flip top and
+// bottom just because a 90° rotation is also in force. vertical works the
+// same way for the caller's top/bottom axis.
+//
+// Worked example: a 13x9 panel at Rotation90 presents to the caller as 9
+// wide, 13 tall (see Rotation). A pixel drawn at the caller's top-right
+// corner, (8, 0):
+//
+//	Rotation90 alone:                       bottom-left of the silkscreen-upright panel
+//	Rotation90, SetMirror(true, false):     top-left (the horizontal flip swaps the
+//	                                        caller's left/right, moving the drawn point
+//	                                        from the caller's top-right to top-left
+//	                                        before rotating)
+//
+// A panel viewed from behind through a diffuser, for instance, is mirrored
+// on both axes at once: SetMirror(true, true). That combination is
+// equivalent to Rotation180 with no mirroring - flipping both axes is the
+// same transform as a half turn - so the 16 nominal (Rotation, mirror)
+// combinations only produce 8 distinct orientations. That's expected, not a
+// bug: don't be surprised to find two settings that behave identically.
+//
+// The zero value leaves both axes unmirrored: no flip is applied.
+func (d *DeviceAdafruitRGBMatrixQT13x9) SetMirror(horizontal, vertical bool) {
+	d.mirrorHorizontal = horizontal
+	d.mirrorVertical = vertical
 }
 
 // Mirror returns the mirroring most recently set with SetMirror.
-func (d *DeviceAdafruitRGBMatrixQT13x9) Mirror() Mirror {
-	return d.mirror
+func (d *DeviceAdafruitRGBMatrixQT13x9) Mirror() (horizontal, vertical bool) {
+	return d.mirrorHorizontal, d.mirrorVertical
 }
 
 // toPanel maps a pixel coordinate in the panel's current, as-mounted and
@@ -147,10 +126,10 @@ func (d *DeviceAdafruitRGBMatrixQT13x9) toPanel(x, y int16) (px, py int16, ok bo
 
 	// Mirroring is defined in the caller's frame, so it is undone here
 	// before rotation, using the caller's (rotated) dimensions.
-	if d.mirror&MirrorHorizontal != 0 {
+	if d.mirrorHorizontal {
 		x = w - 1 - x
 	}
-	if d.mirror&MirrorVertical != 0 {
+	if d.mirrorVertical {
 		y = h - 1 - y
 	}
 
