@@ -101,6 +101,27 @@ func TestGetRandomLengthLimits(t *testing.T) {
 	}
 }
 
+// TestConnectedRejectsForeignDevice guards the bring-up case: address 0x30 is
+// shared with unrelated parts, so acknowledging the address is not evidence
+// of a Trust M
+func TestConnectedRejectsForeignDevice(t *testing.T) {
+	d := New(zeroChip{})
+	if d.Connected() {
+		t.Error("a device answering every register with zeroes was reported as connected")
+	}
+}
+
+// zeroChip acknowledges its address but reads back zeroes from every
+// register, as the IS31FL3741 sharing address 0x30 does
+type zeroChip struct{}
+
+func (zeroChip) Tx(addr uint16, w, r []byte) error {
+	for i := range r {
+		r[i] = 0
+	}
+	return nil
+}
+
 func TestCommandsBeforeConfigure(t *testing.T) {
 	d := New(newFakeChip())
 	if err := d.GetRandom(make([]byte, 16)); err == nil {
@@ -149,18 +170,20 @@ func TestChainedCommand(t *testing.T) {
 	for i := range data {
 		data[i] = byte(i)
 	}
-	if err := d.SetDataObject(0xF1D0, 7, data); err != nil {
+	// 0xF1E0 is a type 2 arbitrary data object, the only kind big enough to
+	// hold a write this long
+	if err := d.SetDataObject(0xF1E0, 7, data); err != nil {
 		t.Fatal(err)
 	}
-	if chip.setOID != 0xF1D0 || chip.setOffset != 7 || !bytes.Equal(chip.setData, data) {
-		t.Errorf("chip received OID %#04X, offset %d, %d bytes; want 0xF1D0, 7, the original data",
+	if chip.setOID != 0xF1E0 || chip.setOffset != 7 || !bytes.Equal(chip.setData, data) {
+		t.Errorf("chip received OID %#04X, offset %d, %d bytes; want 0xF1E0, 7, the original data",
 			chip.setOID, chip.setOffset, len(chip.setData))
 	}
 
 	packet := chip.packets[len(chip.packets)-1]
 	header := []byte{
 		0x82, 0x00, 0x02, 0x5C, // SetDataObject, write data, InLen 604
-		0xF1, 0xD0, 0x00, 0x07, // OID, offset
+		0xF1, 0xE0, 0x00, 0x07, // OID, offset
 	}
 	if !bytes.Equal(packet[:len(header)], header) {
 		t.Errorf("SetDataObject APDU header = %X, want %X", packet[:len(header)], header)

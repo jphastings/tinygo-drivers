@@ -1,8 +1,13 @@
 // Package trustm provides a driver for the Infineon OPTIGA Trust M
 // (SLS32AIA) security chip: a hardware trust anchor with a true random
 // number generator, protected key and data storage, and cryptographic
-// coprocessor. Tested with the Adafruit breakout:
+// coprocessor. Written against boards such as the Adafruit breakout:
 // https://www.adafruit.com/product/4351
+//
+// This driver has been written and reviewed against the Infineon host
+// library and the Solution Reference Manual, and tested against a fake chip
+// implementing the protocol, but it has not yet been run against real
+// silicon. See VALIDATION.md for the bring-up plan.
 //
 // Only a subset of the chip's functionality is implemented: the Infineon
 // I2C protocol transport including packet chaining, opening the
@@ -78,6 +83,10 @@ func deviceError(code uint8) error {
 // The largest frame the chip can be asked to support (IFX_I2C_FRAME_SIZE in
 // the Infineon host library); the chip default is 0x110 bytes
 const maxFrameSize = 277
+
+// The smallest frame size the Infineon I2C protocol permits DATA_REG_LEN to
+// report, so also the smallest plausible reading from a real chip
+const minDataRegLen = 16
 
 // The largest command or response packet (APDU) the driver can exchange;
 // packets bigger than one frame are chained across several frames
@@ -161,9 +170,19 @@ func New(bus drivers.I2C) Device {
 	}
 }
 
-// Connected checks whether an OPTIGA Trust M answers on the bus
+// Connected checks whether an OPTIGA Trust M answers on the bus.
+//
+// The chip has no identification register, so this reads DATA_REG_LEN and
+// checks it against the range the Infineon I2C protocol allows. That is
+// enough to tell the chip apart from an unrelated device sharing address
+// 0x30, which a bare address probe would not.
 func (d *Device) Connected() bool {
-	return d.readRegister(REG_I2C_STATE, d.state[:]) == nil
+	var size [2]byte
+	if d.readRegister(REG_DATA_REG_LEN, size[:]) != nil {
+		return false
+	}
+	length := uint16(size[0])<<8 | uint16(size[1])
+	return length >= minDataRegLen
 }
 
 // Configure soft-resets the chip, reads the frame size it supports and
@@ -195,7 +214,7 @@ func (d *Device) Configure() error {
 		return err
 	}
 	d.frameSize = uint16(size[0])<<8 | uint16(size[1])
-	if d.frameSize < dlOverhead+1 {
+	if d.frameSize < minDataRegLen {
 		d.frameSize = 0
 		return errBadFrame
 	}
@@ -343,12 +362,16 @@ func (d *Device) CalcHash(data []byte) (digest [32]byte, err error) {
 
 // CalcSign signs a digest - typically a SHA-256 hash, e.g. from CalcHash -
 // with the ECDSA private key stored in keyOID, whose usage must include
-// KeyUsageSign. The signature is written to sig and its length returned.
+// KeyUsageSign. The digest may be no longer than the key's curve. The
+// signature is written to sig and its length returned.
 //
 // The chip encodes the signature as the two DER INTEGERs r and s
-// concatenated, without the outer SEQUENCE most ECDSA tooling expects, so
-// the caller may need to prepend one. A P-256 signature is at most 70
-// bytes, a P-384 signature at most 102.
+// concatenated, without the outer SEQUENCE most ECDSA tooling expects, and
+// sometimes gives r or s a leading zero byte its value does not need. Both
+// quirks have to be undone before Go's crypto packages will accept the
+// signature; the trustm/signer subpackage does that. VerifySign takes the
+// chip's own encoding, unaltered. A P-256 signature is at most 70 bytes, a
+// P-384 signature at most 102.
 func (d *Device) CalcSign(keyOID uint16, digest, sig []byte) (int, error) {
 	if d.frameSize == 0 {
 		return 0, errNotConfigured
@@ -527,6 +550,7 @@ func (d *Device) fetchLastError() error {
 
 	resp, err := d.transceive(apduHeaderSize + 6)
 	if err != nil || len(resp) < apduHeaderSize+1 || resp[0] != 0x00 {
+		d.lastErrorCode = 0
 		return errDeviceError
 	}
 	d.lastErrorCode = resp[apduHeaderSize]
@@ -674,6 +698,12 @@ func (d *Device) nextFrame() (control bool, n int, err error) {
 	}
 	if fctr&fctrControlFrame != 0 {
 		return true, n, nil
+	}
+	// A data frame always carries at least the transport layer's PCTR byte;
+	// callers slice the packet fragment out from behind it, which would
+	// underflow on an empty payload
+	if n < dlOverhead+1 {
+		return false, 0, errBadFrame
 	}
 	if (fctr&fctrFrameNrMask)>>fctrFrameNrPos != (d.rxSeq+1)&fctrAckNrMask {
 		return false, 0, errBadFrame
