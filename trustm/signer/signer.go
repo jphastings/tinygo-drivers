@@ -26,6 +26,8 @@ var (
 	errBadPublicKey     = errors.New("trustm/signer: malformed public key")
 	errBadCertificate   = errors.New("trustm/signer: unrecognized certificate object framing")
 	errShortObject      = errors.New("trustm/signer: data object ended early")
+	errNoPublicKey      = errors.New("trustm/signer: signer has no public key")
+	errBadSignature     = errors.New("trustm/signer: malformed signature from the chip")
 )
 
 // Chip is the part of the trustm.Device API this package uses; satisfied by
@@ -47,7 +49,7 @@ type Signer struct {
 // New wraps an existing chip key as a crypto.Signer. The caller must
 // provide the matching public key, e.g. parsed from the key's certificate
 // or remembered from GenKeyPair; for a freshly generated key use Generate
-// instead.
+// instead. Sign needs it to size the digest, so it may not be nil.
 func New(chip Chip, keyOID uint16, pub *ecdsa.PublicKey) *Signer {
 	return &Signer{chip: chip, keyOID: keyOID, pub: pub}
 }
@@ -78,10 +80,18 @@ func (s *Signer) Public() crypto.PublicKey {
 // signature in the ASN.1 SEQUENCE form Go's crypto packages expect
 // (crypto/ecdsa VerifyASN1, crypto/tls, crypto/x509).
 //
-// The digest must already be hashed to the size matching the key's curve.
-// The rand and opts parameters are ignored: the chip uses its internal
-// true random number generator, and signs the digest exactly as given.
+// A digest longer than the key's curve is truncated to its leftmost bytes,
+// as ECDSA prescribes; the chip refuses to sign an oversized one. The rand
+// and opts parameters are ignored: the chip uses its internal true random
+// number generator, and signs the digest exactly as given.
 func (s *Signer) Sign(_ io.Reader, digest []byte, _ crypto.SignerOpts) ([]byte, error) {
+	if s.pub == nil {
+		return nil, errNoPublicKey
+	}
+	if size := (s.pub.Curve.Params().BitSize + 7) / 8; len(digest) > size {
+		digest = digest[:size]
+	}
+
 	// The chip returns the two DER INTEGERs r and s without the outer
 	// SEQUENCE: at most 2+49 bytes each for P-384
 	var raw [112]byte
@@ -89,14 +99,58 @@ func (s *Signer) Sign(_ io.Reader, digest []byte, _ crypto.SignerOpts) ([]byte, 
 	if err != nil {
 		return nil, err
 	}
+	return asn1Signature(raw[:n])
+}
 
-	// Wrapping in a SEQUENCE completes the standard encoding. The content
-	// is at most 102 bytes, so the short length form always suffices.
-	sig := make([]byte, 2+n)
-	sig[0] = 0x30
-	sig[1] = byte(n)
-	copy(sig[2:], raw[:n])
-	return sig, nil
+// asn1Signature adds the outer SEQUENCE the chip leaves off its two DER
+// INTEGERs r and s.
+//
+// The integers are re-encoded rather than copied because the chip sometimes
+// emits a leading zero byte that the value does not need. That is not valid
+// DER and Go's ASN.1 readers reject it outright, so Infineon's host library
+// strips it too (optiga_cmd_ecc_r_s_padding_check in optiga_cmd.c).
+func asn1Signature(chipSig []byte) ([]byte, error) {
+	r, rest, err := splitInteger(chipSig)
+	if err != nil {
+		return nil, err
+	}
+	s, rest, err := splitInteger(rest)
+	if err != nil {
+		return nil, err
+	}
+	if len(rest) != 0 {
+		return nil, errBadSignature
+	}
+
+	// r and s hold at most 48 bytes each on the curves the chip supports, so
+	// the short length form always suffices
+	body := append(derInteger(r), derInteger(s)...)
+	if len(body) > 0x7F {
+		return nil, errBadSignature
+	}
+	return append([]byte{0x30, byte(len(body))}, body...), nil
+}
+
+// splitInteger takes the leading DER INTEGER off buf, returning its value
+// and whatever follows it
+func splitInteger(buf []byte) (value, rest []byte, err error) {
+	if len(buf) < 3 || buf[0] != 0x02 || buf[1] == 0 || 2+int(buf[1]) > len(buf) {
+		return nil, nil, errBadSignature
+	}
+	return buf[2 : 2+buf[1]], buf[2+buf[1]:], nil
+}
+
+// derInteger encodes a non-negative big-endian integer as a minimal DER
+// INTEGER: no redundant leading zeroes, one zero byte added when the leading
+// bit would otherwise mark the value as negative
+func derInteger(value []byte) []byte {
+	for len(value) > 1 && value[0] == 0x00 {
+		value = value[1:]
+	}
+	if value[0]&0x80 != 0 {
+		return append([]byte{0x02, byte(len(value) + 1), 0x00}, value...)
+	}
+	return append([]byte{0x02, byte(len(value))}, value...)
 }
 
 // ellipticCurve maps the chip's curve identifiers onto Go's curves
@@ -177,8 +231,14 @@ func DeviceCertificate(chip Chip) (*x509.Certificate, error) {
 // see DeviceCertificate.
 func Certificate(chip Chip, oid uint16) (*x509.Certificate, error) {
 	var head [9]byte
-	if _, err := chip.GetDataObject(oid, 0, head[:]); err != nil {
+	n, err := chip.GetDataObject(oid, 0, head[:])
+	if err != nil {
 		return nil, err
+	}
+	// A shorter answer means the object holds less than a framing header, so
+	// it is empty rather than holding a certificate
+	if n < len(head) {
+		return nil, errShortObject
 	}
 
 	var start, length int

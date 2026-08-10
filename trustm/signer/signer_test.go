@@ -6,8 +6,10 @@ import (
 	"crypto/elliptic"
 	"crypto/rand"
 	"crypto/sha256"
+	"crypto/sha512"
 	"crypto/x509"
 	"crypto/x509/pkix"
+	"errors"
 	"math/big"
 	"testing"
 
@@ -23,11 +25,16 @@ type fakeChip struct {
 }
 
 func (f *fakeChip) CalcSign(keyOID uint16, digest, sig []byte) (int, error) {
+	size := (f.key.Curve.Params().BitSize + 7) / 8
+	// The chip refuses a digest longer than the key (SRM Table 51)
+	if len(digest) > size {
+		return 0, errors.New("digest longer than the signature key")
+	}
 	r, s, err := ecdsa.Sign(rand.Reader, f.key, digest)
 	if err != nil {
 		return 0, err
 	}
-	return copy(sig, chipSignature(r, s)), nil
+	return copy(sig, chipSignature(r, s, size)), nil
 }
 
 func (f *fakeChip) GenKeyPair(keyOID uint16, curve trustm.Curve, usage trustm.KeyUsage, pub []byte) (int, error) {
@@ -58,16 +65,16 @@ func (f *fakeChip) GetDataObject(oid uint16, offset uint16, data []byte) (int, e
 	return n, nil
 }
 
-// chipSignature encodes r and s the way the chip does: two DER INTEGERs
-// with a 0x00 prepended when the most significant bit is set, and no outer
-// SEQUENCE
-func chipSignature(r, s *big.Int) []byte {
+// chipSignature encodes r and s the way the chip does: two DER INTEGERs with
+// no outer SEQUENCE, each holding the full key size behind a leading zero
+// byte. That zero is redundant whenever the value's top bit is clear, which
+// is why Infineon's host library re-checks the padding of every signature it
+// reads back (optiga_cmd_ecc_r_s_padding_check).
+func chipSignature(r, s *big.Int, size int) []byte {
 	out := []byte{}
 	for _, v := range []*big.Int{r, s} {
-		b := v.Bytes()
-		if b[0]&0x80 != 0 {
-			b = append([]byte{0x00}, b...)
-		}
+		b := make([]byte, size+1)
+		v.FillBytes(b[1:])
 		out = append(out, 0x02, byte(len(b)))
 		out = append(out, b...)
 	}
@@ -97,6 +104,66 @@ func TestSignVerifiesWithGoCrypto(t *testing.T) {
 		if !ecdsa.VerifyASN1(pub, digest[:], sig) {
 			t.Errorf("curve %#02x: Go crypto rejects the converted signature", curve)
 		}
+	}
+}
+
+// TestASN1SignaturePinsEncoding pins the conversion from the chip's bare r,s
+// encoding to standard ASN.1: the SEQUENCE is added, a leading zero the value
+// does not need is dropped, and one it does need is kept
+func TestASN1SignaturePinsEncoding(t *testing.T) {
+	for name, tc := range map[string]struct{ chip, want []byte }{
+		"redundant zero dropped from r and s": {
+			chip: []byte{0x02, 0x03, 0x00, 0x11, 0x22, 0x02, 0x03, 0x00, 0x33, 0x44},
+			want: []byte{0x30, 0x08, 0x02, 0x02, 0x11, 0x22, 0x02, 0x02, 0x33, 0x44},
+		},
+		"zero kept where the top bit is set": {
+			chip: []byte{0x02, 0x03, 0x00, 0x91, 0x22, 0x02, 0x03, 0x00, 0x33, 0x44},
+			want: []byte{0x30, 0x09, 0x02, 0x03, 0x00, 0x91, 0x22, 0x02, 0x02, 0x33, 0x44},
+		},
+		"already minimal is only wrapped": {
+			chip: []byte{0x02, 0x02, 0x11, 0x22, 0x02, 0x02, 0x33, 0x44},
+			want: []byte{0x30, 0x08, 0x02, 0x02, 0x11, 0x22, 0x02, 0x02, 0x33, 0x44},
+		},
+	} {
+		got, err := asn1Signature(tc.chip)
+		if err != nil {
+			t.Errorf("%s: %v", name, err)
+			continue
+		}
+		if !bytes.Equal(got, tc.want) {
+			t.Errorf("%s: asn1Signature(%X) = %X, want %X", name, tc.chip, got, tc.want)
+		}
+	}
+
+	for name, chip := range map[string][]byte{
+		"truncated":        {0x02, 0x04, 0x11, 0x22},
+		"not an integer":   {0x04, 0x02, 0x11, 0x22, 0x02, 0x02, 0x33, 0x44},
+		"trailing garbage": {0x02, 0x02, 0x11, 0x22, 0x02, 0x02, 0x33, 0x44, 0x00},
+		"only r":           {0x02, 0x02, 0x11, 0x22},
+	} {
+		if _, err := asn1Signature(chip); err != errBadSignature {
+			t.Errorf("%s: asn1Signature(%X) = %v, want errBadSignature", name, chip, err)
+		}
+	}
+}
+
+// TestSignTruncatesOversizedDigest checks the crypto.Signer contract against
+// the chip's refusal to sign a digest longer than the key: a SHA-384 digest
+// handed to a P-256 key must be cut to its leftmost 32 bytes, as ECDSA says
+func TestSignTruncatesOversizedDigest(t *testing.T) {
+	chip := &fakeChip{}
+	s, err := Generate(chip, trustm.OID_USER_KEY_1, trustm.P256)
+	if err != nil {
+		t.Fatal(err)
+	}
+
+	digest := sha512.Sum384([]byte("tinygo"))
+	sig, err := s.Sign(nil, digest[:], nil)
+	if err != nil {
+		t.Fatal(err)
+	}
+	if !ecdsa.VerifyASN1(&chip.key.PublicKey, digest[:32], sig) {
+		t.Error("signature does not verify over the truncated digest")
 	}
 }
 
