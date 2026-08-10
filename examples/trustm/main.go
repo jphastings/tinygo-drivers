@@ -50,6 +50,9 @@ func main() {
 	print("SHA-256 of the message: ")
 	printHex(digest[:])
 
+	// Generating a key pair writes the chip's NVM, which has a limited write
+	// endurance; a real application generates an identity key once, not on
+	// every boot as this demonstration does.
 	var pub [80]byte
 	pubLen, err := chip.GenKeyPair(trustm.OID_USER_KEY_1, trustm.P256, trustm.KeyUsageSign, pub[:])
 	if err != nil {
