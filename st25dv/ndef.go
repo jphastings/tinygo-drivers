@@ -94,14 +94,24 @@ func (d *Device) WriteNDEFMessage(msg []byte) error {
 	if err != nil {
 		return err
 	}
-	if magic[0] != ccMagic1ByteAddress && magic[0] != ccMagic2ByteAddress {
-		err = d.FormatNDEF()
-		if err != nil {
+
+	// The magic byte on the tag, not this driver's own size-based guess,
+	// determines where the existing CC ends: a tag formatted elsewhere
+	// may legitimately use the other CC width for its capacity, and
+	// trusting our own guess would misplace the TLV against the real CC.
+	var tlvStart int64
+	switch magic[0] {
+	case ccMagic1ByteAddress:
+		tlvStart = 4
+	case ccMagic2ByteAddress:
+		tlvStart = 8
+	default:
+		if err := d.FormatNDEF(); err != nil {
 			return err
 		}
+		tlvStart = int64(d.ccLength())
 	}
 
-	tlvStart := int64(d.ccLength())
 	lengthSize := int64(1)
 	if len(msg) >= int(tlvLength3Bytes) {
 		lengthSize = 3

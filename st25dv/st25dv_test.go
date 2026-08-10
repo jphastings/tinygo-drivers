@@ -152,6 +152,30 @@ func TestWriteNDEFURI(t *testing.T) {
 	}
 }
 
+// TestWriteNDEFMessageRespectsExistingCCWidth checks the TLV is placed
+// according to the CC already on the tag, not this driver's own size-based
+// guess: a tag can be validly formatted with either CC width for its
+// capacity, and guessing wrong would misalign the TLV against the real CC.
+func TestWriteNDEFMessageRespectsExistingCCWidth(t *testing.T) {
+	tag, d := configured(t)
+
+	// A compact 4-byte CC, even though this 2048-byte tag's own size would
+	// make the driver choose an 8-byte CC when formatting from scratch.
+	cc := []byte{0xE1, 0x40, 0x40, 0x05}
+	copy(tag.user[:], cc)
+
+	if err := d.WriteNDEFMessage([]byte{0xD1, 0x01, 0x00, 'T'}); err != nil {
+		t.Fatal(err)
+	}
+
+	if got := tag.user[:4]; !bytes.Equal(got, cc) {
+		t.Errorf("existing CC was overwritten: got %X, want %X", got, cc)
+	}
+	if tag.user[4] != tlvNDEFMessage {
+		t.Errorf("TLV written at wrong offset: tag.user[4] = %#02x, want the NDEF TLV type %#02x", tag.user[4], tlvNDEFMessage)
+	}
+}
+
 func TestAbbreviateURI(t *testing.T) {
 	cases := []struct {
 		uri  string
