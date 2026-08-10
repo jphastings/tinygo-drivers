@@ -55,15 +55,16 @@ func (d *DeviceAdafruitRGBMatrixQT13x9) SetPixel(x, y int16, c color.RGBA) {
 		offset = 3 * (uint16(x) + 80 + row*3)
 	}
 
-	// The color order alternates between even and odd columns, and the last
-	// column differs once more
+	// The board wires each cell's channels B,G,R (Adafruit's IS3741_BGR
+	// default), and the physical order alternates between even and odd
+	// columns, with the last column differing once more
 	if x&1 == 1 || x == 12 {
-		d.SetLED(offset+2, c.R)
+		d.SetLED(offset+1, c.R)
 		d.SetLED(offset, c.G)
-		d.SetLED(offset+1, c.B)
-	} else {
-		d.SetLED(offset, c.R)
-		d.SetLED(offset+1, c.G)
 		d.SetLED(offset+2, c.B)
+	} else {
+		d.SetLED(offset+2, c.R)
+		d.SetLED(offset+1, c.G)
+		d.SetLED(offset, c.B)
 	}
 }

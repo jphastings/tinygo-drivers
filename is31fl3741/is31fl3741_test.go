@@ -39,11 +39,11 @@ func TestAdafruitRGBMatrixQTMappingReference(t *testing.T) {
 		x, y    int16
 		r, g, b uint16
 	}{
-		{x: 0, y: 0, r: 240, g: 241, b: 242},  // even column
-		{x: 1, y: 6, r: 5, g: 3, b: 4},        // odd column
-		{x: 9, y: 3, r: 119, g: 117, b: 118},  // odd, last column of first block
-		{x: 10, y: 0, r: 342, g: 343, b: 344}, // even, second block
-		{x: 12, y: 8, r: 332, g: 330, b: 331}, // last column special case
+		{x: 0, y: 0, r: 242, g: 241, b: 240},  // even column
+		{x: 1, y: 6, r: 4, g: 3, b: 5},        // odd column
+		{x: 9, y: 3, r: 118, g: 117, b: 119},  // odd, last column of first block
+		{x: 10, y: 0, r: 344, g: 343, b: 342}, // even, second block
+		{x: 12, y: 8, r: 331, g: 330, b: 332}, // last column special case
 	}
 
 	for _, c := range cases {
