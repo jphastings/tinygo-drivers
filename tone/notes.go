@@ -117,11 +117,11 @@ func (n Note) Period() uint64 {
 	octave := (n - 9) / 12
 	note := (n - 9) - octave*12
 
-	// Start with a base period (in nanoseconds) of 6.875Hz (quarter the
+	// Start with a base period (in nanoseconds) of 13.75Hz (half the
 	// frequency of A0) and shift it right with the octave to get the base
 	// period of this note.
-	//     145454545 = 1e9 / 6.875
-	basePeriod := uint32(145454545) >> octave
+	//     72727273 = 1e9 / 13.75
+	basePeriod := uint32(72727273) >> octave
 
 	// Make the pitch higher based on the note within the octave.
 	period := uint64(basePeriod) * uint64(tones[note]) / 32768

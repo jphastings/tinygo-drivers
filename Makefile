@@ -18,8 +18,9 @@ smoke-test:
 rwildcard=$(foreach d,$(wildcard $1*),$(call rwildcard,$d/,$2) $(filter $(subst *,%,$2),$d))
 # Recursively find all *_test.go files from cwd & reduce to unique dir names
 HAS_TESTS = $(sort $(dir $(call rwildcard,,*_test.go)))
-# Exclude anything we explicitly don't want to test for whatever reason
-EXCLUDE_TESTS = image waveshare-epd/epd2in66b
+# Exclude anything we explicitly don't want to test for whatever reason.
+# tone imports machine, so its tests only build under `tinygo test ./tone/`.
+EXCLUDE_TESTS = image waveshare-epd/epd2in66b tone
 TESTS = $(filter-out $(addsuffix /%,$(EXCLUDE_TESTS)),$(HAS_TESTS))
 
 unit-test:
