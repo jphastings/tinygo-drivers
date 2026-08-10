@@ -294,7 +294,7 @@ func TestIlluminanceSaturated(t *testing.T) {
 		integrationTime IntegrationTime
 		satCh0          uint16
 	}{
-		{"100ms full-scale is 36863, not 65535", IntegrationTime100ms, 36863},
+		{"100ms full-scale is 37888, not 65535", IntegrationTime100ms, 37888},
 		{"600ms full-scale is the register max, 65535", IntegrationTime600ms, 65535},
 	}
 

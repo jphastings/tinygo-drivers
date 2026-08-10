@@ -50,17 +50,20 @@ func (t IntegrationTime) settleDuration() time.Duration {
 // treated as saturated for this integration time - not simply 65535 (the
 // register's own maximum) at every setting.
 //
-// Per the CONTROL/CONFIG register's ATIME field description, only the
-// shortest integration time (100ms) saturates below the 16-bit register's
-// natural limit, at 36863 counts; every longer setting saturates at 65535,
-// the register maximum itself. This matches Adafruit's actively maintained
-// CircuitPython driver (adafruit_tsl2591, MAX_COUNT_100MS = 0x8FFF). An
-// earlier (Apr 2013, ams163.5) revision of the AMS datasheet listed 37888
-// for the 100ms case; the current (2018-06-05, v2-04) revision corrects
-// this to 36863, which is the value used here.
+// Only the shortest integration time (100ms) saturates below the 16-bit
+// register's natural limit; every longer setting saturates at 65535, the
+// register maximum itself.
+//
+// The 100ms figure is measured, not quoted: driving a part into saturation
+// at maximum gain clamps both channels at exactly 37888 for 100ms and at
+// 65535 for every longer setting. That matches the Apr 2013 (ams163.5)
+// revision of the AMS datasheet, not the 2018-06-05 (v2-04) revision or
+// Adafruit's CircuitPython driver, which both give 36863. Taking the
+// smaller value would report a genuine reading between the two as
+// saturated.
 func (t IntegrationTime) fullScaleCount() uint16 {
 	if t == IntegrationTime100ms {
-		return 36863
+		return 37888
 	}
 	return 65535
 }
