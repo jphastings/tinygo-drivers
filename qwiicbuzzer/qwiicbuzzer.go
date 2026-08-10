@@ -241,7 +241,10 @@ func (d *Device) writeRegister(reg, value uint8) error {
 // firmware reassembles big-endian - unlike qwiicbutton's 16-bit registers,
 // which are the raw (little-endian) memory layout of a struct field. Getting
 // this backwards produces a frequency or duration wrong by roughly a factor
-// of 256, not a build or transaction error, so it's easy to miss.
+// of 256, not a build or transaction error, so it's easy to miss. Confirmed
+// against a live board: registers 0x03/0x04 power up as 0x0A/0xAA, which is
+// 2730 (SparkFun's documented default frequency) read big-endian and an
+// implausible 43530 read little-endian.
 func (d *Device) readRegister16(reg uint8) (uint16, error) {
 	d.buf[0] = reg
 	err := d.bus.Tx(uint16(d.Address), d.buf[:1], d.buf[1:3])
