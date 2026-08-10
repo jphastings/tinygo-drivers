@@ -145,6 +145,13 @@ func (d *Device) SetBrightness(brightness uint8) error {
 
 // SetBlink makes the whole display blink at one of the BlinkRate constants,
 // or steady with BLINK_OFF. The display is kept switched on.
+//
+// The display on/off bit is written here, and its polarity is taken from the
+// Holtek HT16K33 datasheet - 1 for on - not from the VK16K33 datasheet, whose
+// display setup table prints it the other way round. That table is one of
+// several errors in the same document, which also duplicates dimming rows and
+// carries a default value copied from an adjacent table. A real display lights
+// and blinks correctly with the polarity used here, so leave it alone.
 func (d *Device) SetBlink(rate BlinkRate) error {
 	if rate > BLINK_0_5HZ {
 		return errInvalidBlinkRate
