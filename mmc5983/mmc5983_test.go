@@ -17,12 +17,28 @@ type fakeMMC struct {
 	regs         [0x30]byte
 	writes       []write
 	controlReads int
+
+	// onControlWrite, when set, is called after every control register
+	// write, letting a test change what the next measurement reads back.
+	onControlWrite func(register, value uint8)
 }
 
 func newFakeMMC() *fakeMMC {
 	f := &fakeMMC{}
 	f.regs[PROD_ID_REG] = PROD_ID
 	return f
+}
+
+// setXYZCounts packs 18-bit unsigned counts into the seven output registers,
+// mirroring the layout readFieldsXYZ decodes.
+func (f *fakeMMC) setXYZCounts(x, y, z int32) {
+	f.regs[X_OUT_0_REG] = byte(x >> 10)
+	f.regs[X_OUT_1_REG] = byte(x >> 2)
+	f.regs[Y_OUT_0_REG] = byte(y >> 10)
+	f.regs[Y_OUT_1_REG] = byte(y >> 2)
+	f.regs[Z_OUT_0_REG] = byte(z >> 10)
+	f.regs[Z_OUT_1_REG] = byte(z >> 2)
+	f.regs[XYZ_OUT_2_REG] = byte(x&0b11)<<6 | byte(y&0b11)<<4 | byte(z&0b11)<<2
 }
 
 func (f *fakeMMC) Tx(addr uint16, w, r []byte) error {
@@ -39,6 +55,9 @@ func (f *fakeMMC) Tx(addr uint16, w, r []byte) error {
 			if w[1]&BITS_TM_T != 0 {
 				f.regs[STATUS_REG] |= BITS_MEAS_T_DONE
 			}
+		}
+		if f.onControlWrite != nil {
+			f.onControlWrite(w[0], w[1])
 		}
 		return nil
 	}
@@ -102,6 +121,62 @@ func TestReadMagneticField(t *testing.T) {
 	}
 	if z != 18 {
 		t.Errorf("z = %d nT, want 18", z)
+	}
+}
+
+func TestReadMagneticFieldSetReset(t *testing.T) {
+	fake := newFakeMMC()
+	d := New(fake)
+
+	// True field: X = +1G, Y = 0, Z = -0.5G. A bridge offset of 500 counts
+	// is present on every axis; being unaffected by SET/RESET polarity, it
+	// should cancel out and not appear in the result.
+	const offset = 500
+	fake.onControlWrite = func(register, value uint8) {
+		if register != INT_CTRL_0_REG {
+			return
+		}
+		switch {
+		case value&BITS_SET_OPERATION != 0:
+			fake.setXYZCounts(nullFieldOutput+16384+offset, nullFieldOutput+offset, nullFieldOutput-8192+offset)
+		case value&BITS_RESET_OPERATION != 0:
+			fake.setXYZCounts(nullFieldOutput-16384+offset, nullFieldOutput+offset, nullFieldOutput+8192+offset)
+		}
+	}
+
+	x, y, z, err := d.ReadMagneticFieldSetReset()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if x != 100000 {
+		t.Errorf("x = %d nT, want 100000", x)
+	}
+	if y != 0 {
+		t.Errorf("y = %d nT, want 0", y)
+	}
+	if z != -50000 {
+		t.Errorf("z = %d nT, want -50000", z)
+	}
+
+	// The datasheet's offset-cancellation procedure is: SET, measure, RESET,
+	// measure.
+	want := []write{
+		{INT_CTRL_0_REG, BITS_SET_OPERATION},
+		{INT_CTRL_0_REG, BITS_TM_M},
+		{INT_CTRL_0_REG, BITS_RESET_OPERATION},
+		{INT_CTRL_0_REG, BITS_TM_M},
+	}
+	if len(fake.writes) != len(want) {
+		t.Fatalf("control register writes = %v, want %v", fake.writes, want)
+	}
+	for i, w := range want {
+		if fake.writes[i] != w {
+			t.Errorf("write %d = %v, want %v", i, fake.writes[i], w)
+		}
+	}
+
+	if fake.controlReads != 0 {
+		t.Errorf("control registers were read %d times, they are write-only", fake.controlReads)
 	}
 }
 

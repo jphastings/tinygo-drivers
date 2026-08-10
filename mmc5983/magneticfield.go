@@ -16,6 +16,9 @@ const (
 // ReadMagneticField performs a single measurement and returns the magnetic
 // field of all three axes in nT (nanotesla). 1 G (gauss) = 100_000 nT.
 //
+// This single reading includes the sensor's own bridge offset, which drifts
+// with temperature; for an accurate reading, prefer ReadMagneticFieldSetReset.
+//
 // Please note: to properly correct and calibrate the X, Y and Z channels,
 // you need to determine true offsets (zero points) and scale factors
 // (gains) for all three channels. Further details can be found at:
@@ -29,10 +32,48 @@ func (d *Device) ReadMagneticField() (x, y, z int32, err error) {
 	return countsToNanoteslas(x), countsToNanoteslas(y), countsToNanoteslas(z), nil
 }
 
+// ReadMagneticFieldSetReset performs the datasheet's SET/RESET offset
+// cancellation procedure ("Using Set And Reset To Remove Bridge Offset") and
+// returns the magnetic field of all three axes in nT. It measures once with
+// the sensing elements SET (each axis reads +H+offset) and once RESET (each
+// axis reads -H+offset), where H is the true field and offset is the
+// sensor's bridge offset. Their difference cancels the offset entirely,
+// unlike a single ReadMagneticField call, at the cost of a second
+// measurement and a degauss pulse.
+func (d *Device) ReadMagneticFieldSetReset() (x, y, z int32, err error) {
+	if err := d.PerformSet(); err != nil {
+		return 0, 0, 0, err
+	}
+	xSet, ySet, zSet, err := d.measureXYZ()
+	if err != nil {
+		return 0, 0, 0, err
+	}
+
+	if err := d.PerformReset(); err != nil {
+		return 0, 0, 0, err
+	}
+	xReset, yReset, zReset, err := d.measureXYZ()
+	if err != nil {
+		return 0, 0, 0, err
+	}
+
+	return countsDeltaToNanoteslas(xSet, xReset), countsDeltaToNanoteslas(ySet, yReset), countsDeltaToNanoteslas(zSet, zReset), nil
+}
+
 func countsToNanoteslas(counts int32) int32 {
 	// 100_000 nT/G divided by 16384 counts/G, as the reduced fraction
 	// 3125/512 to stay within int32.
 	return (counts - nullFieldOutput) * 3125 / 512
+}
+
+// countsDeltaToNanoteslas converts a SET/RESET pair of raw counts into a
+// field reading in nT: half their difference, scaled from counts to nT. The
+// null field offset (131072) appears identically in both counts and cancels
+// in the subtraction, so, unlike countsToNanoteslas, it is not applied here.
+func countsDeltaToNanoteslas(setCounts, resetCounts int32) int32 {
+	// 100_000 nT/G divided by 16384 counts/G divided by 2, as the reduced
+	// fraction 3125/1024 to stay within int32.
+	return (setCounts - resetCounts) * 3125 / 1024
 }
 
 // ReadCompass reads the current compass heading from the device and returns
