@@ -59,6 +59,11 @@ type Device struct {
 	integrationTime IntegrationTime
 	measurementRate MeasurementRate
 
+	// pendingDiscard is set by applyConfig and cleared by ReadChannels
+	// once honoured: see ReadChannels for why a configuration change
+	// needs this.
+	pendingDiscard bool
+
 	// Last successful reading, for the drivers.Sensor accessors.
 	lastCh0, lastCh1 uint16
 	lastMilliLux     int32
@@ -173,27 +178,70 @@ func (d *Device) applyConfig(gain Gain, t IntegrationTime, r MeasurementRate) er
 	time.Sleep(wakeupTime)
 
 	d.gain, d.integrationTime, d.measurementRate = gain, t, r
+
+	// ALS_STATUS's new-data flag clears only when ALS_DATA is read, never
+	// on a config write - so if a conversion completed under the old
+	// settings and nobody read it since, the flag is already set the
+	// moment this function returns. Left unhandled, the very next
+	// ReadChannels call would see that flag, skip its wait entirely, and
+	// hand back the previous configuration's counts as if they were
+	// fresh (found on the bench: reconfiguring from 1x/100ms to
+	// 96x/400ms returned the 1x/100ms reading). pendingDiscard makes
+	// ReadChannels throw away whatever conversion completes first after
+	// a config change before trusting the next one.
+	d.pendingDiscard = true
 	return nil
 }
 
 // ReadChannels performs a fresh reading and returns the raw ADC counts:
 // ch0 is the full-spectrum (visible+IR) channel, ch1 is infrared-only. It
 // waits for a conversion to complete first.
+//
+// If a config change (Configure, SetGain, SetIntegrationTime or
+// SetMeasurementRate) happened since the last read, this first discards
+// one full conversion before waiting for and returning the next: the
+// discarded one may be stale data left over from before the config
+// change (its new-data flag set but never read), or a conversion that
+// was already in flight when the new settings were written and so
+// partly or wholly integrated under the old gain/integration time - the
+// datasheet does not document which, or exactly when new settings take
+// effect for a conversion already underway. Either way, whatever
+// conversion completes after the discarded one is guaranteed to have
+// started after the discard read, by which point the current settings
+// were already in effect. This makes the first read after a
+// reconfigure slower than later ones.
 func (d *Device) ReadChannels() (ch0, ch1 uint16, err error) {
-	status, err := d.awaitNewData()
+	if d.pendingDiscard {
+		if _, _, _, err := d.readConversion(); err != nil {
+			return 0, 0, err
+		}
+		d.pendingDiscard = false
+	}
+
+	status, ch0, ch1, err := d.readConversion()
 	if err != nil {
 		return 0, 0, err
 	}
 
-	if err := d.readRegisters(regALSDataCH1L, d.rbuf[:4]); err != nil {
-		return 0, 0, err
-	}
-	ch1 = binary.LittleEndian.Uint16(d.rbuf[0:2])
-	ch0 = binary.LittleEndian.Uint16(d.rbuf[2:4])
-
 	d.lastCh0, d.lastCh1 = ch0, ch1
 	d.lastInvalid = status&statusDataInvalid != 0
 	return ch0, ch1, nil
+}
+
+// readConversion waits for a conversion to complete and returns its raw
+// channel counts alongside the ALS_STATUS byte observed at the same time.
+func (d *Device) readConversion() (status uint8, ch0, ch1 uint16, err error) {
+	status, err = d.awaitNewData()
+	if err != nil {
+		return 0, 0, 0, err
+	}
+
+	if err := d.readRegisters(regALSDataCH1L, d.rbuf[:4]); err != nil {
+		return 0, 0, 0, err
+	}
+	ch1 = binary.LittleEndian.Uint16(d.rbuf[0:2])
+	ch0 = binary.LittleEndian.Uint16(d.rbuf[2:4])
+	return status, ch0, ch1, nil
 }
 
 // Illuminance reads both channels and converts them to illuminance in

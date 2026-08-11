@@ -1,25 +1,40 @@
 package ltr329
 
 import (
+	"encoding/binary"
 	"errors"
 	"testing"
 
 	"tinygo.org/x/drivers"
 )
 
-// fakeLTR329 emulates an LTR-329ALS-01 on the I2C bus, including the two
+// fakeLTR329 emulates an LTR-329ALS-01 on the I2C bus, including the
 // behaviours real silicon enforces but a naive fake would happily ignore:
 // ALS_DATA only appears as a single 4-byte auto-incrementing burst
 // starting at CH1's low byte (see readRegisters), and the new-data status
 // flag clears itself once that burst is read.
+//
+// Once active, every ALS_DATA read immediately re-arms the new-data flag,
+// simulating a sensor that always has its next conversion ready by the
+// time it's asked - real hardware takes measurable time between
+// conversions, but nothing here needs that modelled; suppressNewData
+// exists for the one test that does.
 type fakeLTR329 struct {
 	regs      [0x8D]byte
 	regWrites []regWrite
 	reads     []readCall
 
 	// suppressNewData keeps ALS_STATUS's new-data flag clear regardless
-	// of ALS_CONTR writes, to exercise the conversion-timeout path.
+	// of ALS_CONTR writes or ALS_DATA reads, to exercise the
+	// conversion-timeout path.
 	suppressNewData bool
+
+	// staleCh0/staleCh1, armed by simulateStaleReadAfterConfigure, are
+	// returned by exactly the next ALS_DATA burst read in place of
+	// whatever setChannels last set - simulating a conversion that
+	// completed under the previous configuration and was never read.
+	staleCh0, staleCh1 uint16
+	hasStale           bool
 }
 
 type regWrite struct {
@@ -44,6 +59,10 @@ func (f *fakeLTR329) setChannels(ch0, ch1 uint16) {
 	f.regs[regALSDataCH0L], f.regs[regALSDataCH0H] = byte(ch0), byte(ch0>>8)
 }
 
+func (f *fakeLTR329) simulateStaleReadAfterConfigure(ch0, ch1 uint16) {
+	f.staleCh0, f.staleCh1, f.hasStale = ch0, ch1, true
+}
+
 func (f *fakeLTR329) Tx(addr uint16, w, r []byte) error {
 	if addr != I2CAddress {
 		return errors.New("wrong I2C address")
@@ -64,9 +83,20 @@ func (f *fakeLTR329) Tx(addr uint16, w, r []byte) error {
 
 	case len(w) == 1 && len(r) > 0:
 		f.reads = append(f.reads, readCall{reg, len(r)})
-		copy(r, f.regs[reg:])
-		if reg == regALSDataCH1L && len(r) == 4 {
+		isDataBurst := reg == regALSDataCH1L && len(r) == 4
+		switch {
+		case isDataBurst && f.hasStale:
+			binary.LittleEndian.PutUint16(r[0:2], f.staleCh1)
+			binary.LittleEndian.PutUint16(r[2:4], f.staleCh0)
+			f.hasStale = false
+		default:
+			copy(r, f.regs[reg:])
+		}
+		if isDataBurst {
 			f.regs[regALSStatus] &^= statusNewData
+			if !f.suppressNewData {
+				f.regs[regALSStatus] |= statusNewData
+			}
 		}
 		return nil
 	}
@@ -216,8 +246,11 @@ func TestReadChannelsCH1BeforeCH0(t *testing.T) {
 		t.Fatal(err)
 	}
 	fake.setChannels(27, 43) // real bench reading: dim, IR-rich room
-	fake.reads = nil
+	if _, _, err := d.ReadChannels(); err != nil {
+		t.Fatal(err) // consume the post-configure discard; see TestReadChannelsDiscardsStaleDataAfterConfigure
+	}
 
+	fake.reads = nil
 	ch0, ch1, err := d.ReadChannels()
 	if err != nil {
 		t.Fatal(err)
@@ -234,6 +267,83 @@ func TestReadChannelsCH1BeforeCH0(t *testing.T) {
 	}
 	if len(dataReads) != 1 || dataReads[0] != (readCall{regALSDataCH1L, 4}) {
 		t.Errorf("ALS_DATA reads = %v, want a single 4-byte burst from CH1L (%#02x)", dataReads, regALSDataCH1L)
+	}
+}
+
+// TestReadChannelsDiscardsStaleDataAfterConfigure pins the fix for a bug
+// found on real hardware: ALS_STATUS's new-data flag only clears on an
+// ALS_DATA read, never on a config write, so a conversion that completed
+// under the previous settings and was never read leaves that flag already
+// set the moment a reconfigure returns. Without discarding it, the next
+// ReadChannels call sees the flag, skips its wait, and hands back the
+// previous configuration's counts as if they were a fresh reading taken
+// under the new one.
+func TestReadChannelsDiscardsStaleDataAfterConfigure(t *testing.T) {
+	fake := newFakeLTR329()
+	d := New(fake)
+	if err := d.Configure(Config{Gain: GainX1, IntegrationTime: IntegrationTime100ms, MeasurementRate: MeasurementRate2000ms}); err != nil {
+		t.Fatal(err)
+	}
+	fake.setChannels(27, 43) // reading taken under the old configuration
+
+	fake.simulateStaleReadAfterConfigure(27, 43)
+	if err := d.Configure(Config{Gain: GainX96, IntegrationTime: IntegrationTime400ms, MeasurementRate: MeasurementRate2000ms}); err != nil {
+		t.Fatal(err)
+	}
+	fake.setChannels(9500, 17800) // what the new configuration actually sees
+	fake.reads = nil
+
+	ch0, ch1, err := d.ReadChannels()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch0 != 9500 || ch1 != 17800 {
+		t.Errorf("ReadChannels() after reconfigure = (%d, %d), want (9500, 17800) - not the previous configuration's (27, 43)", ch0, ch1)
+	}
+
+	var dataReads int
+	for _, rc := range fake.reads {
+		if rc == (readCall{regALSDataCH1L, 4}) {
+			dataReads++
+		}
+	}
+	if dataReads != 2 {
+		t.Errorf("ALS_DATA burst reads after reconfigure = %d, want 2 (one discarded, one kept)", dataReads)
+	}
+}
+
+// TestReadChannelsDoesNotDiscardWithoutReconfigure ensures the discard in
+// TestReadChannelsDiscardsStaleDataAfterConfigure only happens once per
+// configuration change, not on every read.
+func TestReadChannelsDoesNotDiscardWithoutReconfigure(t *testing.T) {
+	fake := newFakeLTR329()
+	d := New(fake)
+	if err := d.Configure(Config{}); err != nil {
+		t.Fatal(err)
+	}
+	fake.setChannels(100, 50)
+	if _, _, err := d.ReadChannels(); err != nil {
+		t.Fatal(err) // consume the post-configure discard
+	}
+
+	fake.reads = nil
+	fake.setChannels(200, 90)
+	ch0, ch1, err := d.ReadChannels()
+	if err != nil {
+		t.Fatal(err)
+	}
+	if ch0 != 200 || ch1 != 90 {
+		t.Errorf("ReadChannels() = (%d, %d), want (200, 90)", ch0, ch1)
+	}
+
+	var dataReads int
+	for _, rc := range fake.reads {
+		if rc == (readCall{regALSDataCH1L, 4}) {
+			dataReads++
+		}
+	}
+	if dataReads != 1 {
+		t.Errorf("ALS_DATA burst reads without a reconfigure = %d, want 1 (nothing to discard)", dataReads)
 	}
 }
 
