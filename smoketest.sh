@@ -63,6 +63,7 @@ tinygo build -size short -o ./build/test.hex -target=microbit ./examples/pcd8544
 tinygo build -size short -o ./build/test.hex -target=microbit ./examples/pcd8544/setpixel/main.go
 tinygo build -size short -o ./build/test.hex -target=feather-rp2040 ./examples/seesaw/soil-sensor
 tinygo build -size short -o ./build/test.hex -target=qtpy-rp2040 ./examples/seesaw/rotary-encoder
+tinygo build -size short -o ./build/test.hex -target=qtpy-rp2040 ./examples/seesaw/gpio
 tinygo build -size short -o ./build/test.hex -target=arduino ./examples/servo
 tinygo build -size short -o ./build/test.hex -target=pico     ./examples/sgp30
 tinygo build -size short -o ./build/test.hex -target=pybadge ./examples/shifter/main.go
