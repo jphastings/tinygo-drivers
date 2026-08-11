@@ -40,6 +40,10 @@ func TestDevicesSetPinsAllOff(t *testing.T) {
 	fdev0.Registers[rGPIO|portB] = 0b01010011
 	fdev1.Registers[rGPIO] = 0b10101101
 	fdev1.Registers[rGPIO|portB] = 0b01010010
+	fdev0.Registers[rOLAT] = 0b10101100
+	fdev0.Registers[rOLAT|portB] = 0b01010011
+	fdev1.Registers[rOLAT] = 0b10101101
+	fdev1.Registers[rOLAT|portB] = 0b01010010
 	devs, err := NewI2CDevices(bus, 0x20, 0x21)
 	c.Assert(err, qt.IsNil)
 
@@ -60,6 +64,10 @@ func TestDevicesSetPinsAllOn(t *testing.T) {
 	fdev0.Registers[rGPIO|portB] = 0b01010011
 	fdev1.Registers[rGPIO] = 0b10101101
 	fdev1.Registers[rGPIO|portB] = 0b01010010
+	fdev0.Registers[rOLAT] = 0b10101100
+	fdev0.Registers[rOLAT|portB] = 0b01010011
+	fdev1.Registers[rOLAT] = 0b10101101
+	fdev1.Registers[rOLAT|portB] = 0b01010010
 	devs, err := NewI2CDevices(bus, 0x20, 0x21)
 	c.Assert(err, qt.IsNil)
 
@@ -80,6 +88,10 @@ func TestDevicesSetPinsMask(t *testing.T) {
 	fdev0.Registers[rGPIO|portB] = 0b01010011
 	fdev1.Registers[rGPIO] = 0b10101101
 	fdev1.Registers[rGPIO|portB] = 0b01010010
+	fdev0.Registers[rOLAT] = 0b10101100
+	fdev0.Registers[rOLAT|portB] = 0b01010011
+	fdev1.Registers[rOLAT] = 0b10101101
+	fdev1.Registers[rOLAT|portB] = 0b01010010
 	devs, err := NewI2CDevices(bus, 0x20, 0x21)
 	c.Assert(err, qt.IsNil)
 

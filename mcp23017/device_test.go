@@ -28,6 +28,11 @@ func TestSetPins(t *testing.T) {
 	fdev := newDevice(bus, 0x20)
 	fdev.Registers[rGPIO] = 0b00001111
 	fdev.Registers[rGPIO|portB] = 0b11110000
+	// These pins are already configured as outputs, so their output
+	// latch agrees with what's on the pin - unlike TestNewI2C's
+	// floating-input case below.
+	fdev.Registers[rOLAT] = 0b00001111
+	fdev.Registers[rOLAT|portB] = 0b11110000
 	dev, err := NewI2C(bus, 0x20)
 	c.Assert(err, qt.IsNil)
 	pins, err := dev.GetPins()
@@ -58,6 +63,8 @@ func TestTogglePins(t *testing.T) {
 	fdev := newDevice(bus, 0x20)
 	fdev.Registers[rGPIO] = 0b00001111
 	fdev.Registers[rGPIO|portB] = 0b11110000
+	fdev.Registers[rOLAT] = 0b00001111
+	fdev.Registers[rOLAT|portB] = 0b11110000
 	dev, err := NewI2C(bus, 0x20)
 	c.Assert(err, qt.IsNil)
 	pins, err := dev.GetPins()
@@ -199,6 +206,25 @@ func TestPins(t *testing.T) {
 	c.Assert(p, qt.Equals, Pins(0b110))
 	p.Low(1)
 	c.Assert(p, qt.Equals, Pins(0b100))
+}
+
+func TestNewI2CDoesNotMistakeAFloatingInputForADrivenOutput(t *testing.T) {
+	c := qt.New(t)
+	bus := tester.NewI2CBus(c)
+	fdev := newDevice(bus, 0x20)
+	// All pins reset as inputs, so this GPIO reading is just noise from
+	// an unconnected pin - it says nothing about the output latch,
+	// which is still at its own reset default of all zero.
+	fdev.Registers[rGPIO] = 0b10101101
+	dev, err := NewI2C(bus, 0x20)
+	c.Assert(err, qt.IsNil)
+
+	err = dev.Pin(0).Set(true)
+	c.Assert(err, qt.IsNil)
+	// If the cache had been seeded from that floating GPIO reading
+	// instead of OLAT, pin 0 would already have looked "on" and this
+	// write would have been skipped, leaving the register unwritten.
+	c.Assert(fdev.Registers[rGPIO], qt.Equals, uint8(0b00000001))
 }
 
 func TestInitWithError(t *testing.T) {
