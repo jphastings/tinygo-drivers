@@ -162,6 +162,7 @@ tinygo build -size short -o ./build/test.hex -target=feather-nrf52840 ./examples
 tinygo build -size short -o ./build/test.hex -target=feather-nrf52840 ./examples/tsl2591/main.go
 tinygo build -size short -o ./build/test.hex -target=feather-nrf52840 ./examples/ltr329/main.go
 tinygo build -size short -o ./build/test.hex -target=feather-nrf52840 ./examples/lc709203/main.go
+tinygo build -size short -o ./build/test.hex -target=feather-nrf52840 ./examples/mpr121/main.go
 tinygo build -size short -o ./build/test.hex -target=feather-nrf52840 ./examples/qwiicbuzzer/main.go
 tinygo build -size short -o ./build/test.hex -target=feather-nrf52840 ./examples/qwiicjoystick/main.go
 # network examples (espat)
