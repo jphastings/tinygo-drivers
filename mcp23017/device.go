@@ -91,7 +91,14 @@ func NewI2C(bus drivers.I2C, address uint8) (*Device, error) {
 		bus:  bus,
 		addr: address,
 	}
-	pins, err := d.GetPins()
+	// Seed the cache from OLAT, not GPIO. GPIO reports the live voltage
+	// on each pin, which for a pin still configured as an input (the
+	// reset default for all 16) is whatever is floating or externally
+	// driven there - it has nothing to do with the output state SetPins
+	// needs to diff against. OLAT is the chip's own record of what it
+	// last drove, so it's the only source that's safe to trust as a
+	// pre-write baseline.
+	pins, err := d.readRegisterAB(rOLAT)
 	if err != nil {
 		return nil, errors.New("cannot initialize mcp23017 device at " + hex(address) + ": " + err.Error())
 	}
