@@ -159,6 +159,7 @@ tinygo build -size short -o ./build/test.hex -target=pico ./examples/si5351/main
 tinygo build -size short -o ./build/test.hex -target=pico ./examples/w5500/main.go
 tinygo build -size short -o ./build/test.hex -target=feather-nrf52840 ./examples/mmc5983/main.go
 tinygo build -size short -o ./build/test.hex -target=feather-nrf52840 ./examples/tsl2591/main.go
+tinygo build -size short -o ./build/test.hex -target=feather-nrf52840 ./examples/ltr329/main.go
 tinygo build -size short -o ./build/test.hex -target=feather-nrf52840 ./examples/lc709203/main.go
 tinygo build -size short -o ./build/test.hex -target=feather-nrf52840 ./examples/qwiicbuzzer/main.go
 tinygo build -size short -o ./build/test.hex -target=feather-nrf52840 ./examples/qwiicjoystick/main.go
